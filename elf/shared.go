@@ -1,14 +1,10 @@
-// shared.go — ELF64 ET_DYN shared library parser producing *linker.SharedLib.
+// shared.go — ELF64 ET_DYN shared library parser producing *SharedLib.
 package elf
 
-import (
-	"fmt"
-
-	"github.com/vertex-language/linker"
-)
+import "fmt"
 
 // ParseSharedLib parses an ELF64 ET_DYN shared object from raw bytes.
-func ParseSharedLib(name string, data []byte) (*linker.SharedLib, error) {
+func ParseSharedLib(name string, data []byte) (*SharedLib, error) {
 	r := newReader(data)
 
 	if len(data) < ehdrSize {
@@ -38,7 +34,7 @@ func ParseSharedLib(name string, data []byte) (*linker.SharedLib, error) {
 		return nil, fmt.Errorf("shared %q: no section headers", name)
 	}
 
-	// ── Read section headers ───────────────────────────────────────────────────
+	// ── Read section headers ──────────────────────────────────────────────────
 
 	type secInfo struct {
 		name    string
@@ -53,11 +49,11 @@ func ParseSharedLib(name string, data []byte) (*linker.SharedLib, error) {
 	secs := make([]secInfo, shnum)
 	for i := range secs {
 		base := int(shoff) + i*int(shentsize)
-		secs[i].stype, _ = r.u32(base + shoff_type)
-		secs[i].addr, _  = r.u64(base + shoff_addr)
-		secs[i].offset, _ = r.u64(base + shoff_offset)
-		secs[i].size, _   = r.u64(base + shoff_size)
-		secs[i].link, _   = r.u32(base + shoff_link)
+		secs[i].stype, _   = r.u32(base + shoff_type)
+		secs[i].addr, _    = r.u64(base + shoff_addr)
+		secs[i].offset, _  = r.u64(base + shoff_offset)
+		secs[i].size, _    = r.u64(base + shoff_size)
+		secs[i].link, _    = r.u32(base + shoff_link)
 		secs[i].entsize, _ = r.u64(base + shoff_entsize)
 	}
 
@@ -85,9 +81,9 @@ func ParseSharedLib(name string, data []byte) (*linker.SharedLib, error) {
 
 	// ── Walk .dynamic section ─────────────────────────────────────────────────
 
-	lib := &linker.SharedLib{
+	lib := &SharedLib{
 		Name:    name,
-		Exports: make(map[string]*linker.SharedExport),
+		Exports: make(map[string]*SharedExport),
 	}
 
 	var (
@@ -96,8 +92,6 @@ func ParseSharedLib(name string, data []byte) (*linker.SharedLib, error) {
 		dynSymtabVA uint64
 		sonameOff   uint64
 	)
-	// Placeholder strings resolved after we find the dynamic string table.
-	type deferred struct{ ptr *string; off uint64 }
 	var deferredNeeded []uint64
 	var deferredRpath  []uint64
 
@@ -202,7 +196,7 @@ func ParseSharedLib(name string, data []byte) (*linker.SharedLib, error) {
 				continue
 			}
 
-			lib.Exports[symName] = &linker.SharedExport{
+			lib.Exports[symName] = &SharedExport{
 				Name:    symName,
 				Value:   value,
 				Size:    size,

@@ -1,15 +1,11 @@
-// object.go — ELF64 ET_REL parser producing *linker.Object.
+// object.go — ELF64 ET_REL parser producing *Object.
 package elf
 
-import (
-	"fmt"
-
-	"github.com/vertex-language/linker"
-)
+import "fmt"
 
 // ParseObject parses an ELF64 ET_REL relocatable object from raw bytes
-// and returns a normalised *linker.Object.
-func ParseObject(name string, data []byte) (*linker.Object, error) {
+// and returns a normalised *Object.
+func ParseObject(name string, data []byte) (*Object, error) {
 	r := newReader(data)
 
 	if len(data) < ehdrSize {
@@ -56,14 +52,14 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 		base := int(shoff) + i*int(shentsize)
 		var s shdrRaw
 		var err error
-		if s.nameOff, err = r.u32(base + shoff_name); err != nil { return s, err }
-		if s.stype, err   = r.u32(base + shoff_type); err != nil { return s, err }
-		if s.flags, err   = r.u64(base + shoff_flags); err != nil { return s, err }
-		if s.addr, err    = r.u64(base + shoff_addr); err != nil { return s, err }
-		if s.offset, err  = r.u64(base + shoff_offset); err != nil { return s, err }
-		if s.size, err    = r.u64(base + shoff_size); err != nil { return s, err }
-		if s.link, err    = r.u32(base + shoff_link); err != nil { return s, err }
-		if s.info, err    = r.u32(base + shoff_info); err != nil { return s, err }
+		if s.nameOff, err = r.u32(base + shoff_name); err != nil    { return s, err }
+		if s.stype, err   = r.u32(base + shoff_type); err != nil    { return s, err }
+		if s.flags, err   = r.u64(base + shoff_flags); err != nil   { return s, err }
+		if s.addr, err    = r.u64(base + shoff_addr); err != nil    { return s, err }
+		if s.offset, err  = r.u64(base + shoff_offset); err != nil  { return s, err }
+		if s.size, err    = r.u64(base + shoff_size); err != nil    { return s, err }
+		if s.link, err    = r.u32(base + shoff_link); err != nil    { return s, err }
+		if s.info, err    = r.u32(base + shoff_info); err != nil    { return s, err }
 		if s.align, err   = r.u64(base + shoff_addralign); err != nil { return s, err }
 		if s.entsize, err = r.u64(base + shoff_entsize); err != nil { return s, err }
 		return s, nil
@@ -91,13 +87,13 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 
 	// ── Build ObjectSection slice ─────────────────────────────────────────────
 
-	sections := make([]*linker.ObjectSection, len(shdrs))
+	sections := make([]*ObjectSection, len(shdrs))
 	for i, sh := range shdrs {
 		secName, err := cstr(shstrtab, sh.nameOff)
 		if err != nil {
 			return nil, fmt.Errorf("object %q: section %d name: %w", name, i, err)
 		}
-		sec := &linker.ObjectSection{
+		sec := &ObjectSection{
 			Name:     secName,
 			Flags:    elfSectionFlags(sh.stype, sh.flags),
 			Size:     sh.size,
@@ -118,7 +114,7 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 
 	// ── Parse .symtab ─────────────────────────────────────────────────────────
 
-	var symbols []*linker.ObjectSymbol
+	var symbols []*ObjectSymbol
 
 	for _, sec := range sections {
 		if sec == nil || sec.RawType != shtSymtab {
@@ -131,7 +127,6 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 		strtabSec := sections[sh.link]
 		strtab := strtabSec.Data
 		if strtab == nil {
-			// Read from file bytes directly if the strtab section wasn't given Data.
 			strtabSh := shdrs[sh.link]
 			strtab, err = r.slice(int(strtabSh.offset), int(strtabSh.size))
 			if err != nil {
@@ -140,7 +135,7 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 		}
 
 		n := int(sh.size) / symEntSize
-		symbols = make([]*linker.ObjectSymbol, n)
+		symbols = make([]*ObjectSymbol, n)
 		sr := newReader(sec.Data)
 
 		for i := range symbols {
@@ -154,22 +149,22 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 
 			symName, _ := cstr(strtab, nameOff)
 
-			secIdx := linker.SymSecUndef
+			secIdx := SymSecUndef
 			secName := ""
 			switch {
 			case shndx == shnUndef:
-				secIdx = linker.SymSecUndef
+				secIdx = SymSecUndef
 				secName = ""
 			case shndx == shnAbs:
-				secIdx = linker.SymSecAbs
+				secIdx = SymSecAbs
 				secName = "*ABS*"
 			case shndx == shnCommon:
-				secIdx = linker.SymSecCommon
+				secIdx = SymSecCommon
 				secName = "*COMMON*"
 			case shndx == shnXindex:
-				secIdx = linker.SymSecUndef // extended idx not common in .o files
+				secIdx = SymSecUndef // extended idx not common in .o files
 			case shndx >= shnLoreserve:
-				secIdx = linker.SymSecUndef
+				secIdx = SymSecUndef
 			default:
 				secIdx = int(shndx)
 				if int(shndx) < len(sections) && sections[shndx] != nil {
@@ -177,7 +172,7 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 				}
 			}
 
-			symbols[i] = &linker.ObjectSymbol{
+			symbols[i] = &ObjectSymbol{
 				Name:        symName,
 				Value:       value,
 				Size:        size,
@@ -193,7 +188,7 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 
 	// ── Parse RELA sections ───────────────────────────────────────────────────
 
-	var relocs []*linker.ObjectReloc
+	var relocs []*ObjectReloc
 
 	for _, sec := range sections {
 		if sec == nil || sec.RawType != shtRela {
@@ -207,7 +202,7 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 			offset, _ := sr.u64(base + relaoff_offset)
 			info, _ := sr.u64(base + relaoff_info)
 			addend, _ := sr.i64(base + relaoff_addend)
-			relocs = append(relocs, &linker.ObjectReloc{
+			relocs = append(relocs, &ObjectReloc{
 				TargetSectionIdx: int(sh.info),
 				Offset:           offset,
 				SymIdx:           relaSymIdx(info),
@@ -217,7 +212,7 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 		}
 	}
 
-	return &linker.Object{
+	return &Object{
 		Name:     name,
 		Machine:  machine,
 		EFlags:   eflags,
@@ -229,22 +224,22 @@ func ParseObject(name string, data []byte) (*linker.Object, error) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func elfSectionFlags(shType uint32, shFlags uint64) linker.SectionFlags {
-	var f linker.SectionFlags
+func elfSectionFlags(shType uint32, shFlags uint64) SectionFlags {
+	var f SectionFlags
 	if shFlags&SHF_ALLOC != 0 {
-		f |= linker.SecAlloc
+		f |= SecAlloc
 	}
 	if shFlags&SHF_WRITE != 0 {
-		f |= linker.SecWrite
+		f |= SecWrite
 	}
 	if shFlags&SHF_EXECINSTR != 0 {
-		f |= linker.SecExec
+		f |= SecExec
 	}
 	if shFlags&SHF_TLS != 0 {
-		f |= linker.SecTLS
+		f |= SecTLS
 	}
 	if shType == shtNobits {
-		f |= linker.SecBSS
+		f |= SecBSS
 	}
 	return f
 }
@@ -257,30 +252,30 @@ func isLinkerInternalSection(shType uint32) bool {
 	return false
 }
 
-func elfBinding(b uint8) linker.SymBinding {
+func elfBinding(b uint8) SymBinding {
 	switch b {
 	case STB_GLOBAL:
-		return linker.BindGlobal
+		return BindGlobal
 	case STB_WEAK:
-		return linker.BindWeak
+		return BindWeak
 	default:
-		return linker.BindLocal
+		return BindLocal
 	}
 }
 
-func elfSymType(t uint8) linker.SymType {
+func elfSymType(t uint8) SymType {
 	switch t {
 	case STT_OBJECT:
-		return linker.SymTypeObject
+		return SymTypeObject
 	case STT_FUNC:
-		return linker.SymTypeFunc
+		return SymTypeFunc
 	case STT_SECTION:
-		return linker.SymTypeSection
+		return SymTypeSection
 	case STT_FILE:
-		return linker.SymTypeFile
+		return SymTypeFile
 	case STT_TLS:
-		return linker.SymTypeTLS
+		return SymTypeTLS
 	default:
-		return linker.SymTypeNone
+		return SymTypeNone
 	}
 }
