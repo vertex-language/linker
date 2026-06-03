@@ -8,9 +8,10 @@ import (
 // applyARM64 applies one Mach-O AArch64 relocation to data[off:].
 //
 // relType encoding (packed by object.go):
-//   bits [3:0]  = ARM64_RELOC_* type
-//   bits [9:8]  = r_length  (always 2=4B for instruction relocs, 3=8B for data)
-//   bits [16]   = r_pcrel
+//
+//	bits [3:0]  = ARM64_RELOC_* type
+//	bits [9:8]  = r_length  (always 2=4B for instruction relocs, 3=8B for data)
+//	bits [16]   = r_pcrel
 //
 // ARM64_RELOC_ADDEND is consumed at parse time and folded into A before
 // this function is called.
@@ -142,4 +143,45 @@ func patchPageOff12(instr uint32, byteOffset uint64) (uint32, error) {
 		imm12 := uint32((byteOffset / scale) & 0xFFF)
 		return (instr & 0xFFC003FF) | (imm12 << 10), nil
 	}
+}
+
+// ── ARM64 instruction encoders ────────────────────────────────────────────────
+
+// encodeADRP encodes an ADRP Xd, <label> instruction.
+//
+// AArch64 encoding (A64 §C6.2.10):
+//
+//	[31]    = 1          (ADRP, not ADR)
+//	[30:29] = immlo      (low 2 bits of the 21-bit page-relative immediate)
+//	[28:24] = 10000      (fixed opcode)
+//	[23:5]  = immhi      (high 19 bits of the immediate)
+//	[4:0]   = Rd
+//
+// The 21-bit signed immediate counts 4 KiB pages:
+//
+//	imm21 = int64(target>>12) - int64(PC>>12)
+func encodeADRP(rd uint32, PC, target uint64) uint32 {
+	imm21 := int64(target>>12) - int64(PC>>12)
+	immlo := uint32(imm21) & 0x3
+	immhi := uint32(imm21>>2) & 0x7FFFF
+	return 0x90000000 | (immlo << 29) | (immhi << 5) | (rd & 0x1F)
+}
+
+// encodeLDR64UnsignedOffset encodes a 64-bit unsigned-offset load:
+//
+//	LDR Xt, [Xn, #byteOffset]
+//
+// AArch64 encoding (A64 §C6.2.101, size=11, V=0, opc=01):
+//
+//	[31:30] = 11         (64-bit)
+//	[29:27] = 111
+//	[26]    = 0          (integer register)
+//	[25:24] = 00         (unsigned offset variant)
+//	[23:22] = 01         (load)
+//	[21:10] = imm12      (byteOffset / 8, must be 8-byte aligned)
+//	[9:5]   = Rn
+//	[4:0]   = Rt
+func encodeLDR64UnsignedOffset(rt, rn, byteOffset uint32) uint32 {
+	imm12 := (byteOffset >> 3) & 0xFFF
+	return 0xF9400000 | (imm12 << 10) | ((rn & 0x1F) << 5) | (rt & 0x1F)
 }
