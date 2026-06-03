@@ -257,6 +257,8 @@ func (e *emitter) emit() ([]byte, error) {
 				align:   1,
 			})
 		}
+		// .dynstr must be added before .dynamic so its shIdx is known
+		// when we set dynSec.link below.
 		e.addSec(&builtSection{name: ".dynstr", shType: SHT_STRTAB, flags: SHF_ALLOC, align: 1})
 		e.addSec(&builtSection{
 			name:    ".dynsym",
@@ -272,6 +274,8 @@ func (e *emitter) emit() ([]byte, error) {
 			flags:   SHF_ALLOC | SHF_WRITE,
 			align:   8,
 			entSize: dynEntSize,
+			// sh_link must point to .dynstr per the ELF spec (§5-11).
+			link: uint32(e.secByName[".dynstr"].shIdx),
 		}
 		e.addSec(dynSec)
 	}

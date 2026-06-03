@@ -88,6 +88,12 @@ func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
 
 // Link runs all linking phases and returns the native binary bytes.
 func (l *Linker) Link() ([]byte, error) {
+	// Default entry point for position-dependent and PIE executables.
+	// Shared libraries have no entry point and keep l.entry == "".
+	if l.outputType != OutputShared && l.entry == "" {
+		l.entry = "_start"
+	}
+
 	// Phase 1: transitive shared-library dependency walk.
 	if err := l.walkSharedDeps(); err != nil {
 		return nil, fmt.Errorf("link: dep walk: %w", err)
