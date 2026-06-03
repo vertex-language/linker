@@ -86,7 +86,6 @@ func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
 // Link runs all linking phases and returns the native binary bytes.
 func (l *Linker) Link() ([]byte, error) {
 	// Default entry point for position-dependent and PIE executables.
-	// Shared libraries have no entry point and keep l.entry == "".
 	if l.outputType != OutputShared && l.entry == "" {
 		l.entry = "_start"
 	}
@@ -110,14 +109,18 @@ func (l *Linker) Link() ([]byte, error) {
 		return nil, fmt.Errorf("link: merge: %w", err)
 	}
 
-	// Phase 3b: PLT injection.
+	// Phase 4: dead-code elimination.
+	// Must run BEFORE PLT injection. Synthetic PLT sections have no Pieces so
+	// the GC reachability traversal never marks them, and they get deleted.
+	// Injecting after GC guarantees they survive to address assignment.
+	GC(layout, symtab, allObjects, l.outputType, l.entry)
+
+	// Phase 3b: PLT injection — after GC so .plt / .got.plt / .rela.plt are
+	// not incorrectly eliminated as unreachable.
 	pltSyms := CollectPLTSymbols(symtab, allObjects)
 	if len(pltSyms) > 0 {
 		InjectPLTSections(layout, pltSyms)
 	}
-
-	// Phase 4: dead-code elimination.
-	GC(layout, symtab, allObjects, l.outputType, l.entry)
 
 	// Phase 5: virtual address and file-offset assignment.
 	if err := AssignLayout(l.outputType, layout, 0); err != nil {
@@ -156,11 +159,6 @@ func (l *Linker) Link() ([]byte, error) {
 		}
 	}
 
-	// Auto-set the dynamic interpreter when there are shared-library
-	// dependencies and the caller has not already provided one.
-	// Executables with no DT_NEEDED entries are linked static-style:
-	// omitting .interp/.dynamic prevents overlapping PT_LOAD segments
-	// with conflicting page permissions.
 	if l.outputType != OutputShared && len(needed) > 0 && l.interp == "" {
 		if interp := defaultInterp(l.arch); interp != "" {
 			l.interp = interp
