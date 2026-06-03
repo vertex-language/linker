@@ -38,13 +38,10 @@ type Linker struct {
 }
 
 // NewLinker returns a Linker configured for the given ELF machine architecture.
-// The interpreter path is set to the standard dynamic linker for that arch.
+// The interpreter is NOT set here; Link() sets it automatically when the output
+// has shared-library dependencies. Call SetInterp to override explicitly.
 func NewLinker(arch Arch) *Linker {
-	l := &Linker{arch: arch}
-	if interp := defaultInterp(arch); interp != "" {
-		l.interp = interp
-	}
-	return l
+	return &Linker{arch: arch}
 }
 
 func (l *Linker) SetOutputType(t OutputType) { l.outputType = t }
@@ -156,6 +153,17 @@ func (l *Linker) Link() ([]byte, error) {
 		if !seen[n] {
 			seen[n] = true
 			needed = append(needed, n)
+		}
+	}
+
+	// Auto-set the dynamic interpreter when there are shared-library
+	// dependencies and the caller has not already provided one.
+	// Executables with no DT_NEEDED entries are linked static-style:
+	// omitting .interp/.dynamic prevents overlapping PT_LOAD segments
+	// with conflicting page permissions.
+	if l.outputType != OutputShared && len(needed) > 0 && l.interp == "" {
+		if interp := defaultInterp(l.arch); interp != "" {
+			l.interp = interp
 		}
 	}
 
