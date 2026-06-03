@@ -22,9 +22,9 @@ func parseObject(name string, data []byte) (obj *Object, err error) {
 	machine   := r.u16()
 	nSections := int(r.u16())
 	r.skip(4)
-	symOff    := r.u32()
-	nSyms     := int(r.u32())
-	optSize   := int(r.u16())
+	symOff  := r.u32()
+	nSyms   := int(r.u32())
+	optSize := int(r.u16())
 	r.skip(2)
 
 	if machine != imageMachineAMD64 && machine != imageMachineARM64 {
@@ -295,23 +295,45 @@ func coffSkipSection(name string, ch uint32) bool {
 	return false
 }
 
+// coffReadAddend reads and clears an inline addend from the section data.
+//
+// AMD64 and ARM64 COFF relocation type constants share numeric values
+// (e.g. relAMD64Addr64 == relARM64Addr32 == 1), so we must branch on
+// machine before switching on relType — a combined switch causes duplicate
+// case compile errors.
 func coffReadAddend(data []byte, off int, relType uint32, machine uint16) int64 {
-	switch relType {
-	case relAMD64Addr64, relARM64Addr64:
-		if off+8 <= len(data) {
-			v := int64(binary.LittleEndian.Uint64(data[off:]))
-			binary.LittleEndian.PutUint64(data[off:], 0)
-			return v
+	if machine == imageMachineAMD64 {
+		switch relType {
+		case relAMD64Addr64:
+			if off+8 <= len(data) {
+				v := int64(binary.LittleEndian.Uint64(data[off:]))
+				binary.LittleEndian.PutUint64(data[off:], 0)
+				return v
+			}
+		case relAMD64Addr32, relAMD64Addr32NB,
+			relAMD64Rel32, relAMD64Rel32_1, relAMD64Rel32_2,
+			relAMD64Rel32_3, relAMD64Rel32_4, relAMD64Rel32_5,
+			relAMD64SecRel:
+			if off+4 <= len(data) {
+				v := int32(binary.LittleEndian.Uint32(data[off:]))
+				binary.LittleEndian.PutUint32(data[off:], 0)
+				return int64(v)
+			}
 		}
-	case relAMD64Addr32, relAMD64Addr32NB,
-		relAMD64Rel32, relAMD64Rel32_1, relAMD64Rel32_2,
-		relAMD64Rel32_3, relAMD64Rel32_4, relAMD64Rel32_5,
-		relAMD64SecRel,
-		relARM64Addr32, relARM64Addr32NB, relARM64SecRel, relARM64Rel32:
-		if off+4 <= len(data) {
-			v := int32(binary.LittleEndian.Uint32(data[off:]))
-			binary.LittleEndian.PutUint32(data[off:], 0)
-			return int64(v)
+	} else { // imageMachineARM64
+		switch relType {
+		case relARM64Addr64:
+			if off+8 <= len(data) {
+				v := int64(binary.LittleEndian.Uint64(data[off:]))
+				binary.LittleEndian.PutUint64(data[off:], 0)
+				return v
+			}
+		case relARM64Addr32, relARM64Addr32NB, relARM64SecRel, relARM64Rel32:
+			if off+4 <= len(data) {
+				v := int32(binary.LittleEndian.Uint32(data[off:]))
+				binary.LittleEndian.PutUint32(data[off:], 0)
+				return int64(v)
+			}
 		}
 	}
 	return 0
