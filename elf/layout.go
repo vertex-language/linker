@@ -9,21 +9,20 @@ type Piece struct {
 	Offset uint64 // byte offset within MergedSection.Data
 }
 
-// MergedSection is the result of combining all same-named input sections.
 type MergedSection struct {
-	Name     string
-	Flags    SectionFlags
-	RawType  uint32
-	RawFlags uint64
-	Align    uint64
+    Name     string
+    Flags    SectionFlags
+    RawType  uint32
+    RawFlags uint64
+    Align    uint64
+    EntSize  uint64  // sh_entsize; 0 = not fixed-size entries
 
-	Pieces []Piece
-	Data   []byte // concatenated section bytes; nil for BSS
-	Size   uint64 // total byte size (includes alignment padding between pieces)
+    Pieces []Piece
+    Data   []byte
+    Size   uint64
 
-	// Assigned by AssignLayout.
-	VAddr      uint64
-	FileOffset uint64
+    VAddr      uint64
+    FileOffset uint64
 }
 
 // Layout holds the complete set of merged output sections.

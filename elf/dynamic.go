@@ -89,6 +89,7 @@ func InjectPLTSections(layout *Layout, syms []PLTEntry) {
 		Data:     make([]byte, n*relaEntrySize),
 		Size:     uint64(n * relaEntrySize),
 		Align:    8,
+		EntSize:  relaEntrySize, // ← was missing; causes sh_entsize=0
 	}
 	layout.Sections = append(layout.Sections, plt, gotPLT, relaPLT)
 	layout.secByName[".plt"] = plt

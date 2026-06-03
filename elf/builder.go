@@ -127,6 +127,7 @@ func Emit(req *EmitRequest) ([]byte, error) {
 			Type:                  ms.RawType,
 			Flags:                 ms.RawFlags,
 			Align:                 ms.Align,
+			EntSize:               ms.EntSize, // ← add this
 			PreassignedAddr:       ms.VAddr,
 			PreassignedFileOffset: ms.FileOffset,
 		}
@@ -286,6 +287,18 @@ func (e *emitter) emit() ([]byte, error) {
 	e.addSec(symtabSec)
 	e.addSec(strtabSec)
 	e.addSec(shstrtabSec)
+
+	// Fix up .rela.plt sh_link → .dynsym and sh_info → .got.plt.
+	// Section indices are only final after all addSec calls above; we cannot
+	// set these at InjectPLTSections time because shIdx is not yet assigned.
+	if relaPLT := e.secByName[".rela.plt"]; relaPLT != nil {
+		if dynsym := e.secByName[".dynsym"]; dynsym != nil {
+			relaPLT.link = uint32(dynsym.shIdx)
+		}
+		if gotPLT := e.secByName[".got.plt"]; gotPLT != nil {
+			relaPLT.info = uint32(gotPLT.shIdx)
+		}
+	}
 
 	e.shstrtab.add("")
 	for _, sec := range e.secs {
