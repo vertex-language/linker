@@ -18,7 +18,7 @@ const (
 	R_X86_64_GLOB_DAT      = uint32(6)  // S
 	R_X86_64_JUMP_SLOT     = uint32(7)  // S
 	R_X86_64_RELATIVE      = uint32(8)  // B + A
-	R_X86_64_GOTPCREL      = uint32(9)  // G + GOT + A − P
+	R_X86_64_GOTPCREL      = uint32(9)  // G + GOT + A − P  (also used by encoder for PLT calls)
 	R_X86_64_32            = uint32(10) // S + A (zero-extend)
 	R_X86_64_32S           = uint32(11) // S + A (sign-extend)
 	R_X86_64_16            = uint32(12)
@@ -40,8 +40,8 @@ const (
 	R_X86_64_GOTPCREL64    = uint32(28)
 	R_X86_64_GOTPC64       = uint32(29)
 	R_X86_64_IRELATIVE     = uint32(37)
-	R_X86_64_GOTPCRELX     = uint32(41)
-	R_X86_64_REX_GOTPCRELX = uint32(42)
+	R_X86_64_GOTPCRELX     = uint32(41) // relaxable form of GOTPCREL
+	R_X86_64_REX_GOTPCRELX = uint32(42) // relaxable form of GOTPCREL w/ REX prefix
 )
 
 // elfPatcher dispatches ELF relocations to the correct arch implementation.
@@ -86,16 +86,36 @@ func patchAMD64(data []byte, off int, rtype uint32, P, S uint64, A int64) error 
 	switch rtype {
 	case R_X86_64_NONE:
 		return nil
+
 	case R_X86_64_64:
 		return put64(iS + A)
+
 	case R_X86_64_PC32, R_X86_64_PLT32:
 		return put32(iS + A - iP)
+
+	case R_X86_64_GOTPCREL, R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX:
+		// The encoder (objectfile/elf/write.go) maps mir.RelocGOT → type 9
+		// (R_X86_64_GOTPCREL) for every extern call site. The instruction is a
+		// direct CALL E8 rel32, with addend −4 set by the encoder. After
+		// PatchPLT, S holds the PLT stub VAddr for the symbol, so:
+		//
+		//   S + A − P  =  stubAddr + (−4) − callFieldAddr
+		//              =  stubAddr − (callFieldAddr + 4)
+		//              =  correct signed rel32 displacement to the PLT stub
+		//
+		// GOTPCRELX (41) and REX_GOTPCRELX (42) are relaxable variants emitted
+		// by newer compilers; handled identically here for forward-compatibility.
+		return put32(iS + A - iP)
+
 	case R_X86_64_32:
 		return put32u(iS + A)
+
 	case R_X86_64_32S:
 		return put32(iS + A)
+
 	case R_X86_64_PC64:
 		return put64(iS + A - iP)
+
 	default:
 		return fmt.Errorf("R_X86_64: unhandled relocation type %d", rtype)
 	}
