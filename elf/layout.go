@@ -173,7 +173,8 @@ func ResolveSymbolAddresses(symtab *SymbolTable, layout *Layout) error {
 		}
 		ms, ok := layout.SectionByName(raw.SectionName)
 		if !ok {
-			return fmt.Errorf("symbol %q references unknown output section %q", sym.Name, raw.SectionName)
+			// Section was eliminated by GC — symbol is dead, skip it.
+			continue
 		}
 		var pieceOff uint64
 		found := false
