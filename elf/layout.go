@@ -159,6 +159,19 @@ func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 // ResolveSymbolAddresses fills in VAddr for every defined symbol using the
 // section addresses assigned by AssignLayout.
 func ResolveSymbolAddresses(symtab *SymbolTable, layout *Layout) error {
+	// --- MAGIC LINKER SYMBOLS ---
+	// Intercept _GLOBAL_OFFSET_TABLE_ and point it to the GOT base.
+	if gotSym := symtab.Lookup("_GLOBAL_OFFSET_TABLE_"); gotSym != nil {
+		gotSym.Kind = kindDefined // Mask as defined
+		
+		if gotplt, ok := layout.SectionByName(".got.plt"); ok {
+			gotSym.VAddr = gotplt.VAddr
+		} else if got, ok := layout.SectionByName(".got"); ok {
+			gotSym.VAddr = got.VAddr
+		}
+	}
+	// ----------------------------
+
 	for _, sym := range symtab.All() {
 		if !sym.IsDefined() || sym.RawSym == nil {
 			continue
@@ -171,24 +184,18 @@ func ResolveSymbolAddresses(symtab *SymbolTable, layout *Layout) error {
 		case "":
 			continue
 		}
+		
 		ms, ok := layout.SectionByName(raw.SectionName)
 		if !ok {
-			// Section was eliminated by GC — symbol is dead, skip it.
 			continue
 		}
-		var pieceOff uint64
-		found := false
-		for _, p := range ms.Pieces {
-			if p.Obj == sym.Object && p.Sec.Name == raw.SectionName {
-				pieceOff = p.Offset
-				found = true
+		
+		for _, pc := range ms.Pieces {
+			if pc.Obj == sym.Object && pc.Sec != nil && pc.Sec.Index == raw.SectionIdx {
+				sym.VAddr = ms.VAddr + pc.Offset + raw.Value
 				break
 			}
 		}
-		if !found {
-			return fmt.Errorf("symbol %q: piece not found in output section %q", sym.Name, raw.SectionName)
-		}
-		sym.VAddr = ms.VAddr + pieceOff + raw.Value
 	}
 	return nil
 }

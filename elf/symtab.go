@@ -36,7 +36,16 @@ type TableSymbol struct {
 }
 
 func (s *TableSymbol) IsDefined() bool   { return s.Kind == kindDefined || s.Kind == kindCommon }
-func (s *TableSymbol) IsUndefined() bool { return s.Kind == kindUndefined }
+
+func (s *TableSymbol) IsUndefined() bool { 
+	// Magic linker symbols shouldn't trigger undefined reference errors.
+	// We synthesize them later in the pipeline.
+	if s.Name == "_GLOBAL_OFFSET_TABLE_" {
+		return false
+	}
+	return s.Kind == kindUndefined 
+}
+
 func (s *TableSymbol) IsShared() bool    { return s.Kind == kindShared }
 
 // SymbolTable is the linker's global symbol table.
