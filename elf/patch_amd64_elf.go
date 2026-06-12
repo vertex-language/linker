@@ -95,16 +95,29 @@ func patchAMD64(data []byte, off int, rtype uint32, P, S uint64, A int64) error 
 
 	case R_X86_64_GOTPCREL, R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX:
 		// The encoder (objectfile/elf/write.go) maps mir.RelocGOT → type 9
-		// (R_X86_64_GOTPCREL) for every extern call site. The instruction is a
-		// direct CALL E8 rel32, with addend −4 set by the encoder. After
-		// PatchPLT, S holds the PLT stub VAddr for the symbol, so:
+		// (R_X86_64_GOTPCREL) for every extern call site.
 		//
-		//   S + A − P  =  stubAddr + (−4) − callFieldAddr
-		//              =  stubAddr − (callFieldAddr + 4)
-		//              =  correct signed rel32 displacement to the PLT stub
-		//
-		// GOTPCRELX (41) and REX_GOTPCRELX (42) are relaxable variants emitted
-		// by newer compilers; handled identically here for forward-compatibility.
+		// --- RELAXATION FOR STANDARD CRT OBJECTS ---
+		// Standard C runtimes (like crt1.o) use GOT relocations to load pointers.
+		// Because our custom linker points S to the PLT stub (or direct symbol) 
+		// instead of generating a real GOT load, we MUST relax the instruction:
+		if off >= 2 {
+			// Check if it's a RIP-relative MOV (0x8B) -> relax to LEA (0x8D)
+			if data[off-2] == 0x8b && (data[off-1]&0xc7) == 0x05 {
+				data[off-2] = 0x8d
+			} else if data[off-2] == 0xff && data[off-1] == 0x15 {
+				// call [rip+GOT] -> nop; call S
+				data[off-2] = 0x90
+				data[off-1] = 0xe8
+			} else if data[off-2] == 0xff && data[off-1] == 0x25 {
+				// jmp [rip+GOT] -> nop; jmp S
+				data[off-2] = 0x90
+				data[off-1] = 0xe9
+			}
+		}
+
+		// S + A − P calculates the correct RIP-relative displacement to the symbol
+		// for both LEA, direct CALLs, and our relaxed NOP+CALLs!
 		return put32(iS + A - iP)
 
 	case R_X86_64_32:
