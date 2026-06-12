@@ -1,7 +1,5 @@
 package elf
 
-import "fmt"
-
 // Piece records where one input section's data lands within a MergedSection.
 type Piece struct {
 	Obj    *Object
