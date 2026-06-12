@@ -107,6 +107,15 @@ func (t *SymbolTable) Ingest(objects []*Object, archives []*Archive, shared []*S
 	}
 	for name, sym := range t.entries {
 		if sym.Kind == kindUndefined && !sym.Weak && t.objUndefs[name] {
+			// --- MAGIC LINKER SYMBOLS ---
+			// Intercept _GLOBAL_OFFSET_TABLE_ so it passes validation.
+			// We synthesize its actual address later during the layout phase.
+			if name == "_GLOBAL_OFFSET_TABLE_" {
+				sym.Kind = kindDefined
+				continue
+			}
+			// ----------------------------
+			
 			return fmt.Errorf("undefined reference to %q", name)
 		}
 	}
