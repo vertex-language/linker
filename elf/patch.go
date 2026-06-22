@@ -77,10 +77,27 @@ func applyReloc(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectRel
 				S = rawSym.Value
 
 			case rawSym.Name != "":
-				// Named symbol: use the VAddr resolved by ResolveSymbolAddresses
-				// or assigned to a PLT stub by PatchPLT.
+				// Named symbol: check the global symbol table first (covers
+				// STB_GLOBAL definitions and PLT stubs patched by PatchPLT).
 				if ts := symtab.Lookup(rawSym.Name); ts != nil {
 					S = ts.VAddr
+				} else if rawSym.SectionIdx >= 0 && rawSym.SectionIdx < len(obj.Sections) {
+					// Not in the global table — this is a STB_LOCAL named symbol
+					// (e.g. a compiler-generated read-only data label like data0).
+					// The global symtab skips locals during ingest, so we resolve
+					// it the same way as an anonymous section symbol: walk the
+					// merged section's piece list for this object.
+					symSec := obj.Sections[rawSym.SectionIdx]
+					if symSec != nil {
+						if symMs, ok2 := layout.SectionByName(symSec.Name); ok2 {
+							for _, pc := range symMs.Pieces {
+								if pc.Obj == obj && pc.Sec == symSec {
+									S = symMs.VAddr + pc.Offset + rawSym.Value
+									break
+								}
+							}
+						}
+					}
 				}
 
 			case rawSym.SectionIdx >= 0 && rawSym.SectionIdx < len(obj.Sections):
