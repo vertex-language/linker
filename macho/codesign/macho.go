@@ -1,3 +1,4 @@
+// macho.go
 package codesign
 
 import (
@@ -23,9 +24,9 @@ const (
 
 // Load command numbers.
 const (
-	lcSegment64      uint32 = 0x19
-	lcCodeSignature  uint32 = 0x1d
-	lcReqDyld        uint32 = 0x80000000
+	lcSegment64     uint32 = 0x19
+	lcCodeSignature uint32 = 0x1d
+	lcReqDyld       uint32 = 0x80000000
 )
 
 // Slice is one architecture inside a (possibly fat) Mach-O image. For a thin
@@ -38,13 +39,13 @@ type Slice struct {
 	Bytes     []byte // the slice's bytes (a sub-slice of the parent image)
 	bigEndian bool
 
-	header    machHeader
-	loadCmds  []loadCmd
-	textOff   int64 // __TEXT fileoff (execSegBase)
-	textSize  int64 // __TEXT filesize (execSegLimit)
-	linkEdit  *segment64
-	csCmd     *loadCmd // existing LC_CODE_SIGNATURE, if any
-	isMain    bool
+	header   machHeader
+	loadCmds []loadCmd
+	textOff  int64 // __TEXT fileoff (execSegBase)
+	textSize int64 // __TEXT filesize (execSegLimit)
+	linkEdit *segment64
+	csCmd    *loadCmd // existing LC_CODE_SIGNATURE, if any
+	isMain   bool
 }
 
 type machHeader struct {
@@ -154,7 +155,6 @@ func parseThin(b []byte, fileOff, size int64) (*Slice, error) {
 	case mhCigam64:
 		bo = binary.BigEndian
 	default:
-		// Re-read big-endian to give a clearer message for 32-bit/other.
 		return nil, fmt.Errorf("codesign: unsupported magic 0x%08x (only 64-bit Mach-O supported)", binary.BigEndian.Uint32(b[:4]))
 	}
 
@@ -208,7 +208,6 @@ func parseThin(b []byte, fileOff, size int64) (*Slice, error) {
 }
 
 func parseSegment64(b []byte, bo binary.ByteOrder, cmdOff int64) segment64 {
-	// segment_command_64: cmd,cmdsize,segname[16],vmaddr,vmsize,fileoff,filesize,...
 	name := cstr(b[8:24])
 	return segment64{
 		Name:     name,
@@ -233,9 +232,6 @@ func cstr(b []byte) string {
 // signature data must begin: just past the end of all non-signature content.
 // That is the codeLimit for the CodeDirectory.
 func (s *Slice) signatureRegionStart() int64 {
-	// Signature always sits at the very end of __LINKEDIT, which is the end of
-	// the slice. If a signature already exists, its dataoff marks the start;
-	// otherwise it's the current end of __LINKEDIT.
 	if s.csCmd != nil {
 		bo := s.order()
 		// linkedit_data_command: cmd,cmdsize,dataoff,datasize
@@ -245,7 +241,86 @@ func (s *Slice) signatureRegionStart() int64 {
 }
 
 // hasReservedSignatureSpace reports whether an LC_CODE_SIGNATURE is already
-// present. Inserting a new one into a binary that lacks it requires shifting
-// content and is not supported here (matches codesign_allocate's job, which
-// the linker normally performs).
+// present.
 func (s *Slice) hasReservedSignatureSpace() bool { return s.csCmd != nil }
+
+// embedSignature writes the super blob into the slice at codeLimit, then
+// patches the LC_CODE_SIGNATURE load command and the __LINKEDIT segment to
+// reflect the new size. If the slice's backing buffer is too small it is
+// replaced with a fresh allocation large enough to hold the signature.
+func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
+	need := codeLimit + int64(len(super))
+	if int64(len(s.Bytes)) < need {
+		grown := make([]byte, need)
+		copy(grown, s.Bytes)
+		s.Bytes = grown
+		s.Size = need
+	}
+
+	copy(s.Bytes[codeLimit:], super)
+
+	bo := s.order()
+
+	// Patch LC_CODE_SIGNATURE (linkedit_data_command):
+	//   cmd(4)  cmdsize(4)  dataoff(4)  datasize(4)
+	if s.csCmd != nil {
+		off := s.csCmd.Offset
+		bo.PutUint32(s.Bytes[off+8:], uint32(codeLimit))
+		bo.PutUint32(s.Bytes[off+12:], uint32(len(super)))
+	}
+
+	// Patch __LINKEDIT segment_command_64:
+	//   cmd(4) cmdsize(4) segname(16) vmaddr(8) vmsize(8) fileoff(8) filesize(8)
+	//   filesize is at +48; vmsize is at +32.
+	if s.linkEdit != nil {
+		leOff := s.linkEdit.cmdOff
+		newFileSize := uint64(need) - s.linkEdit.FileOff
+		if newFileSize > s.linkEdit.VMSize {
+			bo.PutUint64(s.Bytes[leOff+32:], newFileSize) // vmsize
+		}
+		bo.PutUint64(s.Bytes[leOff+48:], newFileSize) // filesize
+		s.linkEdit.FileSize = newFileSize
+	}
+
+	return nil
+}
+
+// serialize returns the final image bytes after all slices have been signed.
+// For a thin image it returns the (possibly grown) slice buffer directly. For
+// a fat image it copies each slice back into a reassembled fat binary, updating
+// the fat_arch size fields for any slice whose size changed.
+func (img *Image) serialize() ([]byte, error) {
+	if !img.isFat {
+		return img.Slices[0].Bytes, nil
+	}
+
+	// Determine required output size.
+	outLen := int64(len(img.raw))
+	for _, sl := range img.Slices {
+		if end := sl.Offset + int64(len(sl.Bytes)); end > outLen {
+			outLen = end
+		}
+	}
+
+	out := make([]byte, outLen)
+	copy(out, img.raw) // preserve fat header + any padding between slices
+
+	for _, sl := range img.Slices {
+		copy(out[sl.Offset:], sl.Bytes)
+	}
+
+	// Update fat_arch size fields in case any slice grew.
+	nArch := int(binary.BigEndian.Uint32(out[4:8]))
+	for i := 0; i < nArch; i++ {
+		archOff := 8 + i*20
+		fo := int64(binary.BigEndian.Uint32(out[archOff+8:]))
+		for _, sl := range img.Slices {
+			if sl.Offset == fo {
+				binary.BigEndian.PutUint32(out[archOff+12:], uint32(len(sl.Bytes)))
+				break
+			}
+		}
+	}
+
+	return out, nil
+}
