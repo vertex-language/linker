@@ -398,11 +398,11 @@ func (e *emitter) buildLCs() ([]byte, error) {
 			})
 		}
 		lc = appendSeg64(lc, "__TEXT",
-			e.textVMAddr, e.textVMSize,
-			e.textFileOff, e.textFileSize,
-			VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE,
-			VM_PROT_READ|VM_PROT_EXECUTE,
-			sects)
+					e.textVMAddr, e.textVMSize,
+					e.textFileOff, e.textFileSize,
+					VM_PROT_READ|VM_PROT_EXECUTE, // Fix: Read & Execute only
+					VM_PROT_READ|VM_PROT_EXECUTE,
+					sects)
 	}
 
 	// __DATA
