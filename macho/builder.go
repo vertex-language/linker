@@ -8,6 +8,15 @@ import (
 	"strings"
 )
 
+// In types.go (or a new file, e.g. nlist.go)
+type nlist64Entry struct {
+    strx  uint32
+    ntype uint8
+    nsect uint8
+    ndesc uint16
+    value uint64
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 func emitMachO(req *emitRequest, arch Arch) ([]byte, error) {
