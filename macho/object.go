@@ -299,8 +299,12 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 			}
 
 			symIdx := uint32(0)
+			secRelNum := uint32(0)
 			if extern != 0 {
 				symIdx = symnum + 1
+			} else {
+				// r_extern=0: r_symbolnum is a 1-based section index.
+				secRelNum = symnum
 			}
 
 			packedType := rtype | (rlen << 8) | (pcrel << 16)
@@ -308,6 +312,7 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 				TargetSectionIdx: s.idx,
 				Offset:           uint64(raddr),
 				SymIdx:           symIdx,
+				SecRelNum:        secRelNum,
 				Type:             packedType,
 				Addend:           addend,
 			})

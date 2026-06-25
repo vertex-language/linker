@@ -57,6 +57,14 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 				if rel.TargetSectionIdx != p.Sec.Index {
 					continue
 				}
+
+				// Follow section-relative relocations (r_extern=0, SecRelNum set).
+				if rel.SecRelNum > 0 && int(rel.SecRelNum) < len(p.Obj.Sections) {
+					if refSec := p.Obj.Sections[rel.SecRelNum]; refSec != nil {
+						mark(secToMerged[secKey{p.Obj, refSec.Name}])
+					}
+				}
+
 				if int(rel.SymIdx) >= len(p.Obj.Symbols) {
 					continue
 				}
@@ -82,7 +90,9 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 
 	kept := layout.Sections[:0]
 	for _, ms := range layout.Sections {
-		if ms.Flags&SecAlloc == 0 || reachable[ms] {
+		// Keep: non-alloc sections, reachable sections, and synthetic sections
+		// (len(Pieces)==0 means injected by the linker, e.g. __stubs and __got).
+		if ms.Flags&SecAlloc == 0 || reachable[ms] || len(ms.Pieces) == 0 {
 			kept = append(kept, ms)
 		}
 	}

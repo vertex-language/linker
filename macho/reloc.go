@@ -54,17 +54,38 @@ func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc
 	}
 
 	P := outSec.VAddr + pieceOff + rel.Offset
-	S, err := resolveRelocSym(rel, obj, symtab)
+	S, err := resolveRelocSym(rel, obj, symtab, layout)
 	if err != nil {
 		return err
 	}
 	return p.Apply(outSec.Data, patchOff, rel.Type, P, uint64(S), rel.Addend)
 }
 
-func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable) (int64, error) {
+
+func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout *Layout) (int64, error) {
+	// Section-relative relocation (r_extern=0): SecRelNum is the 1-based
+	// Mach-O section index; resolve to that section's output VA + piece offset.
 	if rel.SymIdx == 0 {
+		if rel.SecRelNum == 0 {
+			return 0, nil
+		}
+		if int(rel.SecRelNum) < len(obj.Sections) {
+			sec := obj.Sections[rel.SecRelNum]
+			if sec != nil {
+				ms, ok := layout.SectionByName(sec.Name)
+				if ok {
+					for _, p := range ms.Pieces {
+						if p.Obj == obj && p.Sec == sec {
+							return int64(ms.VAddr + p.Offset), nil
+						}
+					}
+					return int64(ms.VAddr), nil
+				}
+			}
+		}
 		return 0, nil
 	}
+
 	if int(rel.SymIdx) >= len(obj.Symbols) {
 		return 0, fmt.Errorf("reloc symbol index %d out of range", rel.SymIdx)
 	}

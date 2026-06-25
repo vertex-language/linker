@@ -75,11 +75,12 @@ type ObjectSymbol struct {
 
 // ObjectReloc is one RELA-style relocation entry from an input object.
 type ObjectReloc struct {
-	TargetSectionIdx int
-	Offset           uint64
-	SymIdx           uint32
-	Type             uint32
-	Addend           int64
+    TargetSectionIdx int
+    Offset           uint64
+    SymIdx           uint32
+    SecRelNum        uint32 // 1-based Mach-O section index when r_extern=0
+    Type             uint32
+    Addend           int64
 }
 
 // Object is a parsed relocatable input object file.
