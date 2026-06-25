@@ -509,6 +509,11 @@ func (e *emitter) serialize(lc []byte) []byte {
 	case OutputExec:
 		filetype = MH_EXECUTE
 		flags = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+		// Fix: Apple Silicon completely forbids non-PIE executables. 
+		// We must force the MH_PIE flag or the kernel will SIGKILL (137) it.
+		if e.arch == ArchARM64 {
+			flags |= MH_PIE
+		}
 	case OutputPIE:
 		filetype = MH_EXECUTE
 		flags = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
