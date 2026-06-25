@@ -15,6 +15,7 @@ with a real certificate and CMS signature.
 ```go
 import "github.com/vertex-language/linker/macho"
 import "github.com/vertex-language/linker/macho/codesign"
+
 ```
 
 ---
@@ -44,6 +45,7 @@ if err != nil {
     log.Fatal(err)
 }
 os.WriteFile("a.out", signed, 0755)
+
 ```
 
 > **Apple Silicon note:** `OutputExec` (non-PIE) is automatically promoted to
@@ -60,12 +62,13 @@ os.WriteFile("a.out", signed, 0755)
 
 ```go
 l := macho.NewLinker(arch)   // arch: macho.ArchAMD64 or macho.ArchARM64
+
 ```
 
 ### Configuration
 
 | Method | Description |
-|---|---|
+| --- | --- |
 | `SetOutputType(t OutputType)` | `OutputExec`, `OutputPIE`, or `OutputShared` |
 | `SetEntryPoint(name string)` | Symbol name of the entry point (default `_main`) |
 | `SetSoname(name string)` | Install name for dylib output |
@@ -79,6 +82,7 @@ l := macho.NewLinker(arch)   // arch: macho.ArchAMD64 or macho.ArchARM64
 l.AddObject("foo.o", data)                // relocatable object
 l.AddArchive("libfoo.a", data)            // static archive (members extracted on demand)
 l.AddDynamicLibrary("libbar.dylib", data) // dynamic library (pass nil for cache-only libs)
+
 ```
 
 All three methods accept raw file bytes; reading from disk is the caller's
@@ -89,6 +93,7 @@ exist only in the dyld shared cache (e.g. `libSystem.B.dylib` on macOS 12+).
 
 ```go
 out, err := l.Link()
+
 ```
 
 Returns the complete Mach-O binary as `[]byte`. The linker reserves space for
@@ -106,6 +111,7 @@ const (
     OutputPIE                      // position-independent executable (MH_EXECUTE + MH_PIE)
     OutputShared                   // shared library (MH_DYLIB)
 )
+
 ```
 
 ---
@@ -117,6 +123,7 @@ const (
     ArchAMD64 Arch = iota + 1 // x86-64
     ArchARM64                  // AArch64 / Apple Silicon
 )
+
 ```
 
 ---
@@ -126,7 +133,7 @@ const (
 `Link()` runs the following phases automatically:
 
 | # | Phase |
-|---|---|
+| --- | --- |
 | 1 | Transitive shared-library dependency walk |
 | 2 | Symbol resolution (objects → archives → dylibs, left-to-right) |
 | 3 | Section merging + PLT/GOT stub injection |
@@ -145,12 +152,12 @@ can run after `Link()` returns or against any other finished binary.
 
 ## Symbol resolution rules
 
-- **Strong definition** beats weak; first strong wins.
-- **Weak + weak**: first encountered wins.
-- **Common**: largest size wins; a hard definition always overrides common.
-- **Shared library** symbols fill undefined references but are overridden by any object-file definition.
-- Libraries present only in the dyld shared cache (passed as `nil` data) are treated as stub libraries: any still-undefined symbol is assumed to be provided by them and gets a GOT/bind entry emitted for dyld to fill at load time.
-- Unresolved non-weak references are a link error.
+* **Strong definition** beats weak; first strong wins.
+* **Weak + weak**: first encountered wins.
+* **Common**: largest size wins; a hard definition always overrides common.
+* **Shared library** symbols fill undefined references but are overridden by any object-file definition.
+* Libraries present only in the dyld shared cache (passed as `nil` data) are treated as stub libraries: any still-undefined symbol is assumed to be provided by them and gets a GOT/bind entry emitted for dyld to fill at load time.
+* Unresolved non-weak references are a link error.
 
 ---
 
@@ -158,8 +165,8 @@ can run after `Link()` returns or against any other finished binary.
 
 GC runs after section merging. Roots are:
 
-- **Executables**: the entry-point symbol.
-- **Dylibs**: all global non-weak exported symbols.
+* **Executables**: the entry-point symbol.
+* **Dylibs**: all global non-weak exported symbols.
 
 Sections unreachable from any root (and marked allocatable) are dropped before
 address assignment.
@@ -173,6 +180,7 @@ when it provides a definition for an otherwise-undefined symbol.
 
 ```go
 l.AddArchive("libruntime.a", data)
+
 ```
 
 Both GNU/SysV (`/`, `/SYM64/`) and BSD (`__.SYMDEF`, `__.SYMDEF_64`) symbol
@@ -188,11 +196,7 @@ this is enforced in the kernel — an unsigned binary will not execute. On Intel
 it determines Gatekeeper behaviour for locally-built binaries.
 
 Unlike the old reserve-then-fill primitive, the package now **parses the binary
-itself**. Point it at a finished Mach-O and it locates `__TEXT` and
-`__LINKEDIT`, reads the existing `LC_CODE_SIGNATURE`, recomputes every page
-hash, builds the SuperBlob, and writes it back — fat (universal) or thin, one
-slice or many. There is no dependency on `debug/macho`, no shelling out to the
-real `codesign`, and no Apple-only libraries.
+itself**. Point it at a finished Mach-O and it locates `__TEXT` and `__LINKEDIT`, reads the existing `LC_CODE_SIGNATURE`, and performs a strict two-pass update. First, it **pre-calculates the final signature size to safely patch the load commands**, then it **hashes every code page**, builds the SuperBlob, and writes it back — fat (universal) or thin, one slice or many. This ensures perfect Page 0 hash validation by Apple Mobile File Integrity (AMFI). There is no dependency on `debug/macho`, no shelling out to the real `codesign`, and no Apple-only libraries.
 
 ### The high-level API
 
@@ -205,13 +209,16 @@ type Options struct {
     Hardened     bool             // set CS_RUNTIME (hardened runtime)
     Entitlements []byte           // raw XML entitlements plist (optional)
     HashType     uint8            // 0 => SHA-256
+    Logger       *Logger          // nil => silent at all levels
 }
 
 // Sign an in-memory image, return new bytes (fat or thin).
 func SignImage(raw []byte, opts Options) ([]byte, error)
 
 // Sign a file on disk in place. Mirrors `codesign --sign`.
-func SignFile(path string, opts Options) error
+// (Uses an atomic rename strategy to clear kernel vnode caches on Apple Silicon).
+func SignFile(path string, opts Options) (SignResult, error)
+
 ```
 
 ### Signing the linker's output directly
@@ -233,12 +240,14 @@ if err != nil {
     log.Fatal(err)
 }
 os.WriteFile("myapp", signed, 0755)
+
 ```
 
 Or sign a file that's already on disk:
 
 ```go
-err := codesign.SignFile("./myapp", codesign.Options{Identifier: "myapp"})
+_, err := codesign.SignFile("./myapp", codesign.Options{Identifier: "myapp"})
+
 ```
 
 This works on **any** Mach-O that already carries an `LC_CODE_SIGNATURE` — the
@@ -260,7 +269,7 @@ if err != nil {
 
 ents, _ := os.ReadFile("myapp.entitlements") // XML plist
 
-err = codesign.SignFile("./myapp", codesign.Options{
+_, err = codesign.SignFile("./myapp", codesign.Options{
     Identifier:   "com.example.myapp",
     TeamID:       "ABCDE12345",
     Identity:     id,          // => CMS signature blob is added
@@ -268,6 +277,7 @@ err = codesign.SignFile("./myapp", codesign.Options{
     Entitlements: ents,
     Force:        true,
 })
+
 ```
 
 With an `Identity` set, the signer drops the `CS_ADHOC` flag, emits a designated
@@ -281,6 +291,7 @@ The `cmd/codesigner` binary mirrors the system tool's call shape with zero `exec
 
 ```sh
 go install github.com/vertex-language/linker/cmd/codesigner@latest
+
 ```
 
 ```sh
@@ -293,10 +304,11 @@ go run ./macho/codesign/cmd/codesign --sign - -f ./main
 # production: Developer ID, hardened runtime, entitlements
 codesigner --sign "Developer ID" --cert dev.pem --key dev.key \
     -o --entitlements myapp.entitlements -f ./main
+
 ```
 
 | Flag | Meaning |
-|---|---|
+| --- | --- |
 | `--sign <id>` | `-` for ad-hoc, or an identity name/path for production |
 | `--cert`, `--key` | PEM certificate (+chain) and private key for production |
 | `--identifier <id>` | Explicit signing identifier (default: file base name) |
@@ -304,6 +316,7 @@ codesigner --sign "Developer ID" --cert dev.pem --key dev.key \
 | `--entitlements <path>` | Entitlements plist (XML) |
 | `-f` | Replace any existing signature |
 | `-o` | Enable hardened runtime (`CS_RUNTIME`) |
+| `-v`, `-vv`, `-vvv` | Verbose output levels (architecture, load commands, hashes) |
 
 ### What an ad-hoc signature contains
 
@@ -320,6 +333,7 @@ SuperBlob  (magic 0xFADE0CC0)
 │   ├── special slots: −2 Requirements  (empty set for ad-hoc)
 │   └── code slots:    one SHA-256 hash per 4 KiB page
 └── Requirements     (magic 0xFADE0C01, empty)
+
 ```
 
 A production signature adds the special-slot hashes for any entitlements, a
@@ -335,12 +349,13 @@ SuperBlob  (magic 0xFADE0CC0)
 ├── Entitlements   (magic 0xFADE7171, XML plist)
 ├── DER Entitlements (magic 0xFADE7172)
 └── CMS Wrapper    (magic 0xFADE0B01, detached PKCS#7)
+
 ```
 
 ### Flags reference
 
 | Constant | Value | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `CS_ADHOC` | `0x00000002` | Ad-hoc signed; no certificate |
 | `CS_RUNTIME` | `0x00010000` | Hardened runtime (required for notarization) |
 | `CS_LINKER_SIGNED` | `0x00020000` | Signed automatically by the linker |
@@ -366,6 +381,7 @@ codesign.Sign(
     int64(textFileOff), int64(textFileSize),
     true,                                      // isMain
 )
+
 ```
 
 Most callers should prefer `SignImage` / `SignFile`: they recover `codeSize`,
@@ -385,6 +401,7 @@ if err != nil {
     // e.g. "link: symbol resolution: undefined reference to \"_foo\""
     log.Fatal(err)
 }
+
 ```
 
 Signing errors carry the slice context for fat binaries, e.g.
@@ -422,4 +439,6 @@ macho/
     ├── identity.go       – Signing identity (cert + key) from PEM
     ├── cms.go            – Detached CMS/PKCS#7 signature (production)
     ├── sign.go           – Options + SignImage / SignFile orchestration
+    └── logger.go         – Verbose logging levels (-v, -vv, -vvv)
+
 ```
