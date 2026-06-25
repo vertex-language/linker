@@ -61,35 +61,60 @@ func (t *SymbolTable) All() []*TableSymbol {
 // Ingest processes all inputs and performs symbol resolution using classical
 // Unix left-to-right command-line semantics.
 func (t *SymbolTable) Ingest(objects []*Object, archives []*Archive, shared []*SharedLib) error {
-	for _, obj := range objects {
-		if err := t.ingestObject(obj); err != nil {
-			return err
-		}
-	}
-	for _, lib := range shared {
-		t.ingestShared(lib)
-	}
-	for {
-		extracted := false
-		for _, ar := range archives {
-			n, err := t.extractFromArchive(ar)
-			if err != nil {
-				return err
-			}
-			if n > 0 {
-				extracted = true
-			}
-		}
-		if !extracted {
-			break
-		}
-	}
-	for name, sym := range t.entries {
-		if sym.Kind == kindUndefined && !sym.Weak && t.objUndefs[name] {
-			return fmt.Errorf("undefined reference to %q", name)
-		}
-	}
-	return nil
+    for _, obj := range objects {
+        if err := t.ingestObject(obj); err != nil {
+            return err
+        }
+    }
+    for _, lib := range shared {
+        t.ingestShared(lib)
+    }
+    for {
+        extracted := false
+        for _, ar := range archives {
+            n, err := t.extractFromArchive(ar)
+            if err != nil {
+                return err
+            }
+            if n > 0 {
+                extracted = true
+            }
+        }
+        if !extracted {
+            break
+        }
+    }
+
+    // Stub libraries (nil data — live only in the dyld shared cache, e.g.
+    // libSystem.B.dylib on macOS 12+) have no parsed exports. Any undefined
+    // symbol that survives to this point is assumed to be provided by one of
+    // these stubs; mark it kindShared so it passes the undefined check and
+    // gets a GOT/bind entry emitted for dyld to fill at load time.
+    var stubLibs []*SharedLib
+    for _, lib := range shared {
+        if len(lib.Exports) == 0 {
+            stubLibs = append(stubLibs, lib)
+        }
+    }
+    if len(stubLibs) > 0 {
+        for name, sym := range t.entries {
+            if sym.Kind == kindUndefined && t.objUndefs[name] {
+                t.entries[name] = &TableSymbol{
+                    Name: name,
+                    Kind: kindShared,
+                    Lib:  stubLibs[0],
+                    Weak: sym.Weak,
+                }
+            }
+        }
+    }
+
+    for name, sym := range t.entries {
+        if sym.Kind == kindUndefined && !sym.Weak && t.objUndefs[name] {
+            return fmt.Errorf("undefined reference to %q", name)
+        }
+    }
+    return nil
 }
 
 func (t *SymbolTable) ingestObject(obj *Object) error {
