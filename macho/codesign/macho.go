@@ -327,3 +327,9 @@ func (img *Image) serialize() ([]byte, error) {
 
 	return out, nil
 }
+
+// hasReservedSignatureSpace reports whether an LC_CODE_SIGNATURE is already
+// present.
+func (s *Slice) hasReservedSignatureSpace() bool { 
+	return s.csCmd != nil 
+}
