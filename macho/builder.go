@@ -128,14 +128,16 @@ func (e *emitter) computeRanges() {
 		}
 		last := e.textSecs[len(e.textSecs)-1]
 		e.textFileOff = 0
-		e.textFileSize = last.FileOffset + last.Size
-		e.textVMSize = last.VAddr + last.Size - e.textVMAddr
+		
+		// Fix: Align the segment sizes to page boundaries (4096 bytes)
+		e.textFileSize = alignUp64(last.FileOffset+last.Size, layoutPageSize)
+		e.textVMSize = alignUp64(last.VAddr+last.Size-e.textVMAddr, layoutPageSize)
 	}
 
 	if len(e.dataSecs) > 0 {
 		first := e.dataSecs[0]
-		e.dataVMAddr = first.VAddr
-		e.dataFileOff = first.FileOffset
+		e.dataVMAddr = first.VAddr &^ (layoutPageSize - 1)
+		e.dataFileOff = first.FileOffset &^ (layoutPageSize - 1)
 		var lastVM, lastFile uint64
 		for _, ms := range e.dataSecs {
 			if end := ms.VAddr + ms.Size; end > lastVM {
@@ -147,9 +149,11 @@ func (e *emitter) computeRanges() {
 				}
 			}
 		}
-		e.dataVMSize = lastVM - e.dataVMAddr
+		
+		// Fix: Align DATA segment sizes as well
+		e.dataVMSize = alignUp64(lastVM-e.dataVMAddr, layoutPageSize)
 		if lastFile > e.dataFileOff {
-			e.dataFileSize = lastFile - e.dataFileOff
+			e.dataFileSize = alignUp64(lastFile-e.dataFileOff, layoutPageSize)
 		}
 	}
 
@@ -158,9 +162,10 @@ func (e *emitter) computeRanges() {
 		afterFile = e.dataFileOff + e.dataFileSize
 		afterVM = e.dataVMAddr + e.dataVMSize
 	} else if len(e.textSecs) > 0 {
-		afterFile = e.textFileSize
+		afterFile = e.textFileOff + e.textFileSize
 		afterVM = e.textVMAddr + e.textVMSize
 	}
+	
 	e.linkEditFileOff = alignUp64(afterFile, layoutPageSize)
 	e.linkEditVMAddr = alignUp64(afterVM, layoutPageSize)
 }
@@ -735,7 +740,15 @@ func dylibCmd(buf []byte, cmd uint32, name string) []byte {
 func appendUUID(buf []byte) []byte {
 	buf = u32(buf, LC_UUID)
 	buf = u32(buf, uint32(uuidCmdSize))
-	return append(buf, make([]byte, 16)...)
+	
+	// Fix: dyld rejects a completely empty UUID on newer macOS versions.
+	// Providing a dummy/pseudo-random UUID satisfies the loader.
+	uuid := []byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+	}
+	
+	return append(buf, uuid...)
 }
 
 func appendCodeSig(buf []byte, off, size uint32) []byte {
