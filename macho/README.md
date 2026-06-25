@@ -275,23 +275,23 @@ requirement (`identifier "<id>" and anchor apple generic`), and appends a
 detached CMS/PKCS#7 blob whose signed attributes carry the content type, signing
 time, message digest, and Apple's `cdHashes` plist attribute.
 
-### CLI: a `codesign(1)` replacement
+### CLI: a `codesigner(1)` replacement
 
-The `cmd/codesign` binary mirrors the system tool's call shape with zero `exec`:
+The `cmd/codesigner` binary mirrors the system tool's call shape with zero `exec`:
 
 ```sh
-go install github.com/vertex-language/linker/cmd/codesign@latest
+go install github.com/vertex-language/linker/cmd/codesigner@latest
 ```
 
 ```sh
 # ad-hoc — equivalent to:  codesign --sign - ./main -f
-codesign --sign - -f ./main
+codesigner --sign - -f ./main
 
 # or straight from source, exactly as you'd run the Apple tool
 go run ./macho/codesign/cmd/codesign --sign - -f ./main
 
 # production: Developer ID, hardened runtime, entitlements
-codesign --sign "Developer ID" --cert dev.pem --key dev.key \
+codesigner --sign "Developer ID" --cert dev.pem --key dev.key \
     -o --entitlements myapp.entitlements -f ./main
 ```
 
