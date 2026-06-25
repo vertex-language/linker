@@ -80,6 +80,9 @@ type machoEmitter struct {
 	stubsIST uint32
 	gotIST   uint32
 	nPLT     int
+
+	codeSignOff  uint64
+	codeSignSize uint64
 }
 
 type nlist64Entry struct {
@@ -362,11 +365,24 @@ func (b *machoEmitter) buildLoadCommands() ([]byte, error) {
 
 	off := b.linkeditFileOff
 	rebaseOff := off; off += uint64(len(b.rebaseBlob))
-	bindOff := off; off += uint64(len(b.bindBlob))
+	bindOff   := off; off += uint64(len(b.bindBlob))
 	exportOff := off; off += uint64(len(b.exportBlob))
-	symOff := off; off += uint64(len(b.symtabBlob))
+	symOff    := off; off += uint64(len(b.symtabBlob))
 	indirectOff := off; off += uint64(len(b.indirectBlob))
 	strtabOff := off; off += uint64(len(b.strtabBlob))
+
+	// Reserve space for the code signature at the end of __LINKEDIT.
+	// codeLimit = everything before the signature; nPages drives hash count.
+	// We align to 16 bytes as codesign requires.
+	if isExec {
+		off = alignUp64(off, 16)
+		b.codeSignOff = off
+		nPages := (off + 0xFFF) >> 12
+		// SuperBlob(20) + CodeDirectory header(88) + identifier(6) + hashes
+		b.codeSignSize = alignUp64(20+88+6+nPages*32, 8)
+		off += b.codeSignSize
+	}
+
 	linkeditSize := off - b.linkeditFileOff
 
 	w := newLCWriter()
@@ -431,7 +447,7 @@ func (b *machoEmitter) buildLoadCommands() ([]byte, error) {
 			b.dataSegFileOff, b.dataSegFileSize, dataProt, dataProt, sects)
 	}
 
-	// __LINKEDIT
+	// __LINKEDIT — vmsize now covers the code signature too
 	w.seg64("__LINKEDIT", b.linkeditVMAddr, linkeditSize,
 		b.linkeditFileOff, linkeditSize, VM_PROT_READ, VM_PROT_READ, nil)
 
@@ -454,9 +470,14 @@ func (b *machoEmitter) buildLoadCommands() ([]byte, error) {
 	if isExec {
 		var entryOff uint64
 		if sym := req.Symtab.Lookup(req.Entry); sym != nil {
-			entryOff = sym.VAddr - 0x100000000
+			// entryOff is a FILE offset into __TEXT, not a VA-relative value.
+			// Formula: (symVA - textSegVMAddr) + textSegFileOff
+			entryOff = (sym.VAddr - b.textSegVMAddr) + b.textSegFileOff
 		}
 		lc = appendMain(lc, entryOff)
+
+		// LC_CODE_SIGNATURE must be last — codesign expects it at the end.
+		lc = appendCodeSignature(lc, uint32(b.codeSignOff), uint32(b.codeSignSize))
 	} else {
 		soname := req.Soname
 		if soname == "" {
@@ -692,11 +713,16 @@ func (b *machoEmitter) serialize(lcBytes []byte) []byte {
 		uint64(len(b.indirectBlob)) +
 		uint64(len(b.strtabBlob))
 
+	// Include the reserved code-signature slot.
+	if b.codeSignSize > 0 {
+		totalSize = b.codeSignOff + b.codeSignSize
+	}
+
 	out := make([]byte, totalSize)
 
-	binary.LittleEndian.PutUint32(out[0:], MH_MAGIC_64)
-	binary.LittleEndian.PutUint32(out[4:], uint32(cputype))
-	binary.LittleEndian.PutUint32(out[8:], uint32(cpusubtype))
+	binary.LittleEndian.PutUint32(out[0:],  MH_MAGIC_64)
+	binary.LittleEndian.PutUint32(out[4:],  uint32(cputype))
+	binary.LittleEndian.PutUint32(out[8:],  uint32(cpusubtype))
 	binary.LittleEndian.PutUint32(out[12:], filetype)
 	binary.LittleEndian.PutUint32(out[16:], ncmds)
 	binary.LittleEndian.PutUint32(out[20:], sizeofcmds)
@@ -716,14 +742,29 @@ func (b *machoEmitter) serialize(lcBytes []byte) []byte {
 	}
 
 	fo := b.linkeditFileOff
-	copy(out[fo:], b.rebaseBlob); fo += uint64(len(b.rebaseBlob))
-	copy(out[fo:], b.bindBlob); fo += uint64(len(b.bindBlob))
-	copy(out[fo:], b.exportBlob); fo += uint64(len(b.exportBlob))
-	copy(out[fo:], b.symtabBlob); fo += uint64(len(b.symtabBlob))
+	copy(out[fo:], b.rebaseBlob);   fo += uint64(len(b.rebaseBlob))
+	copy(out[fo:], b.bindBlob);     fo += uint64(len(b.bindBlob))
+	copy(out[fo:], b.exportBlob);   fo += uint64(len(b.exportBlob))
+	copy(out[fo:], b.symtabBlob);   fo += uint64(len(b.symtabBlob))
 	copy(out[fo:], b.indirectBlob); fo += uint64(len(b.indirectBlob))
 	copy(out[fo:], b.strtabBlob)
 
+	// Compute the ad-hoc code signature over all bytes up to codeSignOff,
+	// then write it into the reserved slot. Must be last.
+	if b.codeSignSize > 0 {
+		sig := buildAdHocCodeSignature(out[:b.codeSignOff], b.textSegFileSize)
+		copy(out[b.codeSignOff:], sig)
+	}
+
 	return out
+}
+
+func appendCodeSignature(buf []byte, dataOff, dataSize uint32) []byte {
+	buf = appendU32(buf, LC_CODE_SIGNATURE)
+	buf = appendU32(buf, 16) // cmdsize: cmd(4) + cmdsize(4) + dataoff(4) + datasize(4)
+	buf = appendU32(buf, dataOff)
+	buf = appendU32(buf, dataSize)
+	return buf
 }
 
 // ── Binary encoding helpers ───────────────────────────────────────────────────
@@ -751,9 +792,10 @@ func countLCs(lcBytes []byte) (ncmds, sizeofcmds uint32) {
 			break
 		}
 		ncmds++
+		sizeofcmds += cmdsize // ← was: return uint32(len(lcBytes))
 		pos += int(cmdsize)
 	}
-	return ncmds, uint32(len(lcBytes))
+	return ncmds, sizeofcmds
 }
 
 func machoSectionTypeAttr(ms *MergedSection) (stype, sattr uint32) {
@@ -798,6 +840,96 @@ func findInstallPath(soname string) string {
 		return path
 	}
 	return "/usr/lib/" + soname
+}
+
+// buildAdHocCodeSignature produces a minimal ad-hoc SuperBlob + CodeDirectory
+// that satisfies macOS arm64's signature requirement without a developer cert.
+// data is the binary content up to (not including) the signature slot.
+// execSegFileSize is the filesize of the __TEXT segment (b.textSegFileSize).
+//
+// Note: code-signing structures are big-endian regardless of the host arch.
+func buildAdHocCodeSignature(data []byte, execSegFileSize uint64) []byte {
+	const (
+		csmagicEmbeddedSignature = uint32(0xFADE0CC0)
+		csmagicCodeDirectory     = uint32(0xFADE0C02)
+		cdVersion                = uint32(0x20400) // supports execSeg fields
+		cdFlagAdhoc              = uint32(0x00000002)
+		csSlotCodeDirectory      = uint32(0)
+		hashTypeSHA256           = uint8(2)
+		sha256Len                = 32
+		pageBytes                = 4096
+		pageSizeLog2             = uint8(12)
+	)
+
+	identifier := []byte("a.out\x00")
+
+	nPages := (len(data) + pageBytes - 1) / pageBytes
+
+	// CodeDirectory layout:
+	//   88-byte fixed header  (version 0x20400)
+	//   identifier bytes
+	//   nPages × 32-byte SHA-256 hashes
+	const cdFixedHdrSize = 88
+	identOffset := uint32(cdFixedHdrSize)
+	hashOffset  := uint32(cdFixedHdrSize + len(identifier))
+	cdSize      := uint32(cdFixedHdrSize + len(identifier) + nPages*sha256Len)
+
+	cd := make([]byte, cdSize)
+	be := binary.BigEndian
+	be.PutUint32(cd[0:],  csmagicCodeDirectory)
+	be.PutUint32(cd[4:],  cdSize)
+	be.PutUint32(cd[8:],  cdVersion)
+	be.PutUint32(cd[12:], cdFlagAdhoc)
+	be.PutUint32(cd[16:], hashOffset)  // offset of first code hash within CD
+	be.PutUint32(cd[20:], identOffset) // offset of identifier string within CD
+	be.PutUint32(cd[24:], 0)           // nSpecialSlots
+	be.PutUint32(cd[28:], uint32(nPages))
+	be.PutUint32(cd[32:], uint32(len(data))) // codeLimit: byte count to hash
+	cd[36] = sha256Len    // hashSize
+	cd[37] = hashTypeSHA256
+	cd[38] = 0            // platform (0 = no platform)
+	cd[39] = pageSizeLog2
+	be.PutUint32(cd[40:], 0) // spare2
+	be.PutUint32(cd[44:], 0) // scatterOffset  (v2.1)
+	be.PutUint32(cd[48:], 0) // teamOffset     (v2.2)
+	be.PutUint32(cd[52:], 0) // spare3         (v2.3)
+	be.PutUint64(cd[56:], 0) // codeLimit64    (v2.3)
+	be.PutUint64(cd[64:], 0) // execSegBase    (v2.4) — file offset of __TEXT
+	be.PutUint64(cd[72:], execSegFileSize) // execSegLimit (v2.4)
+	be.PutUint64(cd[80:], 1) // execSegFlags   (v2.4) — CS_EXECSEG_MAIN_BINARY
+
+	copy(cd[identOffset:], identifier)
+
+	// Hash each 4 KiB page; the final page is zero-padded.
+	page := make([]byte, pageBytes)
+	for i := 0; i < nPages; i++ {
+		start := i * pageBytes
+		end := start + pageBytes
+		if end > len(data) {
+			// Clear reused buffer tail so padding is deterministic.
+			clear(page[len(data)-start:])
+			end = len(data)
+		}
+		copy(page, data[start:end])
+		h := sha256.Sum256(page)
+		copy(cd[int(hashOffset)+i*sha256Len:], h[:])
+	}
+
+	// SuperBlob: magic(4) + length(4) + count(4) + BlobIndex[type(4)+offset(4)] + CD
+	const superHdrSize = 12
+	const blobIdxSize  = 8
+	superSize := uint32(superHdrSize + blobIdxSize + len(cd))
+
+	super := make([]byte, superSize)
+	be.PutUint32(super[0:], csmagicEmbeddedSignature)
+	be.PutUint32(super[4:], superSize)
+	be.PutUint32(super[8:], 1) // one blob
+	// BlobIndex[0]: CSSLOT_CODEDIRECTORY at offset 20 (right after this index)
+	be.PutUint32(super[12:], csSlotCodeDirectory)
+	be.PutUint32(super[16:], uint32(superHdrSize+blobIdxSize))
+	copy(super[superHdrSize+blobIdxSize:], cd)
+
+	return super
 }
 
 const REFERENCE_FLAG_UNDEFINED_NON_LAZY = uint16(0)
