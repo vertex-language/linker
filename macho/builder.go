@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// In types.go (or a new file, e.g. nlist.go)
+// 
 type nlist64Entry struct {
     strx  uint32
     ntype uint8
@@ -670,15 +670,34 @@ func appendSymtab(buf []byte, symoff, nsyms, stroff, strsize uint32) []byte {
 func appendDysymtab(buf []byte, nlocal, nextdef, nundef, indoff, nind uint32) []byte {
 	buf = u32(buf, LC_DYSYMTAB)
 	buf = u32(buf, uint32(dysymtabCmdSize))
-	buf = u32(buf, 0);              buf = u32(buf, nlocal)
-	buf = u32(buf, nlocal);         buf = u32(buf, nextdef)
-	buf = u32(buf, nlocal+nextdef); buf = u32(buf, nundef)
-	for i := 0; i < 8; i++ {
+	
+	// Local symbols
+	buf = u32(buf, 0)
+	buf = u32(buf, nlocal)
+	
+	// Externally defined symbols
+	buf = u32(buf, nlocal)
+	buf = u32(buf, nextdef)
+	
+	// Undefined symbols
+	buf = u32(buf, nlocal+nextdef)
+	buf = u32(buf, nundef)
+	
+	// Write exactly 6 unused fields (tocoff, ntoc, modtaboff, nmodtab, extrefsymoff, nextrefsyms)
+	for i := 0; i < 6; i++ {
 		buf = u32(buf, 0)
 	}
-	buf = u32(buf, indoff); buf = u32(buf, nind)
-	buf = u32(buf, 0);      buf = u32(buf, 0)
-	buf = u32(buf, 0);      buf = u32(buf, 0)
+	
+	// Indirect symbol table
+	buf = u32(buf, indoff)
+	buf = u32(buf, nind)
+	
+	// External and local relocation entries (unused)
+	buf = u32(buf, 0) // extreloff
+	buf = u32(buf, 0) // nextrel
+	buf = u32(buf, 0) // locreloff
+	buf = u32(buf, 0) // nlocrel
+	
 	return buf
 }
 
