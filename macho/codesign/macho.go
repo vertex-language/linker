@@ -240,22 +240,22 @@ func (s *Slice) signatureRegionStart() int64 {
 	return int64(s.linkEdit.FileOff + s.linkEdit.FileSize)
 }
 
-// hasReservedSignatureSpace reports whether an LC_CODE_SIGNATURE is already
-// present.
-func (s *Slice) hasReservedSignatureSpace() bool { return s.csCmd != nil }
-
 // embedSignature writes the super blob into the slice at codeLimit, then
 // patches the LC_CODE_SIGNATURE load command and the __LINKEDIT segment to
 // reflect the new size. If the slice's backing buffer is too small it is
-// replaced with a fresh allocation large enough to hold the signature.
+// replaced with a fresh allocation; if it's too large, it is truncated.
 func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
 	need := codeLimit + int64(len(super))
-	if int64(len(s.Bytes)) < need {
+	
+	// Ensure the slice is exactly `need` bytes long, dropping trailing garbage
+	if int64(cap(s.Bytes)) >= need {
+		s.Bytes = s.Bytes[:need]
+	} else {
 		grown := make([]byte, need)
-		copy(grown, s.Bytes)
+		copy(grown, s.Bytes[:codeLimit])
 		s.Bytes = grown
-		s.Size = need
 	}
+	s.Size = need
 
 	copy(s.Bytes[codeLimit:], super)
 
@@ -286,7 +286,7 @@ func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
 }
 
 // serialize returns the final image bytes after all slices have been signed.
-// For a thin image it returns the (possibly grown) slice buffer directly. For
+// For a thin image it returns the (possibly truncated) slice buffer directly. For
 // a fat image it copies each slice back into a reassembled fat binary, updating
 // the fat_arch size fields for any slice whose size changed.
 func (img *Image) serialize() ([]byte, error) {
@@ -294,8 +294,8 @@ func (img *Image) serialize() ([]byte, error) {
 		return img.Slices[0].Bytes, nil
 	}
 
-	// Determine required output size.
-	outLen := int64(len(img.raw))
+	// Determine required output size dynamically from updated slices.
+	outLen := int64(0)
 	for _, sl := range img.Slices {
 		if end := sl.Offset + int64(len(sl.Bytes)); end > outLen {
 			outLen = end
@@ -303,13 +303,16 @@ func (img *Image) serialize() ([]byte, error) {
 	}
 
 	out := make([]byte, outLen)
-	copy(out, img.raw) // preserve fat header + any padding between slices
+	
+	// Preserve fat header + any padding between slices up to the new length limit.
+	// (copy automatically stops at the smaller of len(dst) or len(src))
+	copy(out, img.raw) 
 
 	for _, sl := range img.Slices {
 		copy(out[sl.Offset:], sl.Bytes)
 	}
 
-	// Update fat_arch size fields in case any slice grew.
+	// Update fat_arch size fields in case any slice grew or shrank.
 	nArch := int(binary.BigEndian.Uint32(out[4:8]))
 	for i := 0; i < nArch; i++ {
 		archOff := 8 + i*20
