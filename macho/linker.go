@@ -79,6 +79,16 @@ func (l *Linker) AddArchive(name string, data []byte) error {
 }
 
 func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
+	// nil/empty data means we only need the LC_LOAD_DYLIB name emitted.
+	// This is the case for libSystem.B.dylib on macOS 12+ which lives only
+	// in the dyld shared cache and has no on-disk file to parse.
+	if len(data) == 0 {
+		l.shared = append(l.shared, &SharedLib{
+			Name:   name,
+			Soname: name,
+		})
+		return nil
+	}
 	lib, err := l.backend.parseSharedLib(name, data)
 	if err != nil {
 		return fmt.Errorf("AddDynamicLibrary %q: %w", name, err)
