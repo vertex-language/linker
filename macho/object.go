@@ -271,8 +271,17 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 				continue
 			}
 
+			// ARM64 instruction relocations encode nothing useful in the
+			// instruction word — the assembler leaves placeholder bits that
+			// must not be interpreted as an addend. Only ARM64_RELOC_UNSIGNED
+			// (absolute data pointer) actually stores an addend in the bytes.
+			// AMD64 PC-relative relocs store −4 (next-instruction bias) which
+			// the patch functions expect, so we always read those.
+			isARM64InstrReloc := cpuType == CPU_TYPE_ARM64 &&
+				rtype != ARM64_RELOC_UNSIGNED
+
 			addend := int64(0)
-			if int(raddr) < len(secData) {
+			if !isARM64InstrReloc && int(raddr) < len(secData) {
 				switch rlen {
 				case 2:
 					if int(raddr)+4 <= len(secData) {

@@ -5,315 +5,221 @@ import "fmt"
 
 // ParseObject parses an ELF64 ET_REL relocatable object from raw bytes
 // and returns a normalised *Object.
-func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
-	r := newReader(data, name)
+func ParseObject(name string, data []byte) (*Object, error) {
+	r := newReader(data)
 
-	magic, err := r.U32(0)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+	if len(data) < ehdrSize {
+		return nil, fmt.Errorf("object %q: file too small", name)
 	}
-	if magic != MH_MAGIC_64 {
-		return nil, fmt.Errorf("%s: unsupported Mach-O magic 0x%X (expected 64-bit LE)", name, magic)
+	if string(data[0:4]) != "\x7fELF" {
+		return nil, fmt.Errorf("object %q: bad ELF magic", name)
 	}
-
-	cpuType, err := r.I32(4)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+	if data[EI_CLASS] != elfClass64 {
+		return nil, fmt.Errorf("object %q: not ELF64", name)
 	}
-	fileType, err := r.U32(12)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
-	}
-	if fileType != MH_OBJECT {
-		return nil, fmt.Errorf("%s: expected MH_OBJECT, got filetype 0x%X", name, fileType)
+	if data[EI_DATA] != elfData2LSB {
+		return nil, fmt.Errorf("object %q: only little-endian supported", name)
 	}
 
-	ncmds, err := r.U32(16)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+	eType, _ := r.u16(ehoff_type)
+	if eType != etRel {
+		return nil, fmt.Errorf("object %q: not ET_REL (e_type=%d)", name, eType)
 	}
 
-	var machine uint16
-	switch cpuType {
-	case CPU_TYPE_AMD64:
-		machine = 0x3E // EM_X86_64
-	case CPU_TYPE_ARM64:
-		machine = 0xB7 // EM_AARCH64
+	machine, _ := r.u16(ehoff_machine)
+	eflags, _ := r.u32(ehoff_flags)
+	shoff, _ := r.u64(ehoff_shoff)
+	shentsize, _ := r.u16(ehoff_shentsize)
+	shnum, _ := r.u16(ehoff_shnum)
+	shstrndx, _ := r.u16(ehoff_shstrndx)
+
+	if uint64(shentsize) < shdrSize {
+		return nil, fmt.Errorf("object %q: e_shentsize=%d too small", name, shentsize)
 	}
 
-	obj := &Object{
-		Name:     name,
-		Machine:  machine,
-		Sections: []*ObjectSection{nil},
-		Symbols:  []*ObjectSymbol{nil},
+	// ── Section headers ───────────────────────────────────────────────────────
+
+	type shdrRaw struct {
+		nameOff, stype uint32
+		flags          uint64
+		addr, offset   uint64
+		size           uint64
+		link, info     uint32
+		align, entsize uint64
 	}
 
-	type rawSection struct {
-		segname   string
-		sectname  string
-		addr      uint64
-		size      uint64
-		offset    uint32
-		align     uint32
-		reloff    uint32
-		nreloc    uint32
-		flags     uint32
-		reserved1 uint32
-		reserved2 uint32
-		idx       int
+	readShdr := func(i int) (shdrRaw, error) {
+		base := int(shoff) + i*int(shentsize)
+		var s shdrRaw
+		var err error
+		if s.nameOff, err = r.u32(base + shoff_name); err != nil    { return s, err }
+		if s.stype, err   = r.u32(base + shoff_type); err != nil    { return s, err }
+		if s.flags, err   = r.u64(base + shoff_flags); err != nil   { return s, err }
+		if s.addr, err    = r.u64(base + shoff_addr); err != nil    { return s, err }
+		if s.offset, err  = r.u64(base + shoff_offset); err != nil  { return s, err }
+		if s.size, err    = r.u64(base + shoff_size); err != nil    { return s, err }
+		if s.link, err    = r.u32(base + shoff_link); err != nil    { return s, err }
+		if s.info, err    = r.u32(base + shoff_info); err != nil    { return s, err }
+		if s.align, err   = r.u64(base + shoff_addralign); err != nil { return s, err }
+		if s.entsize, err = r.u64(base + shoff_entsize); err != nil { return s, err }
+		return s, nil
 	}
 
-	var sections []rawSection
-	var symoff, nsyms, stroff, strsize uint32
-
-	pos := machHeaderSize64
-	for i := uint32(0); i < ncmds; i++ {
-		cmd, err := r.U32(pos)
+	shdrs := make([]shdrRaw, shnum)
+	for i := range shdrs {
+		sh, err := readShdr(i)
 		if err != nil {
-			return nil, fmt.Errorf("%s: lc[%d] cmd: %w", name, i, err)
+			return nil, fmt.Errorf("object %q: shdr %d: %w", name, i, err)
 		}
-		cmdsize, err := r.U32(pos + 4)
+		shdrs[i] = sh
+	}
+
+	// ── .shstrtab ─────────────────────────────────────────────────────────────
+
+	if int(shstrndx) >= len(shdrs) {
+		return nil, fmt.Errorf("object %q: e_shstrndx=%d out of range", name, shstrndx)
+	}
+	shstrSh := shdrs[shstrndx]
+	shstrtab, err := r.view(int(shstrSh.offset), int(shstrSh.size))
+	if err != nil {
+		return nil, fmt.Errorf("object %q: reading shstrtab: %w", name, err)
+	}
+
+	// ── Build ObjectSection slice ─────────────────────────────────────────────
+
+	sections := make([]*ObjectSection, len(shdrs))
+	for i, sh := range shdrs {
+		secName, err := cstr(shstrtab, sh.nameOff)
 		if err != nil {
-			return nil, fmt.Errorf("%s: lc[%d] cmdsize: %w", name, i, err)
+			return nil, fmt.Errorf("object %q: section %d name: %w", name, i, err)
 		}
-		if cmdsize < 8 {
-			return nil, fmt.Errorf("%s: lc[%d] invalid cmdsize %d", name, i, cmdsize)
+		sec := &ObjectSection{
+			Name:     secName,
+			Flags:    elfSectionFlags(sh.stype, sh.flags),
+			Size:     sh.size,
+			Align:    sh.align,
+			RawType:  sh.stype,
+			RawFlags: sh.flags,
+			Index:    i,
+			Skip:     isLinkerInternalSection(sh.stype),
 		}
-
-		switch cmd {
-		case LC_SEGMENT_64:
-			if int(cmdsize) < segCmdSize64 {
-				break
-			}
-			nsects, _ := r.U32(pos + 64)
-			secOff := pos + segCmdSize64
-			for s := uint32(0); s < nsects; s++ {
-				if secOff+sectSize64 > pos+int(cmdsize) {
-					break
-				}
-				sectname, _ := r.FixedString(secOff, 16)
-				seg2, _ := r.FixedString(secOff+16, 16)
-				addr, _ := r.U64(secOff + 32)
-				size, _ := r.U64(secOff + 40)
-				offset, _ := r.U32(secOff + 48)
-				align, _ := r.U32(secOff + 52)
-				reloff, _ := r.U32(secOff + 56)
-				nreloc, _ := r.U32(secOff + 60)
-				flags, _ := r.U32(secOff + 64)
-				reserved1, _ := r.U32(secOff + 68)
-				reserved2, _ := r.U32(secOff + 72)
-				sections = append(sections, rawSection{
-					segname:   strings.TrimRight(seg2, "\x00"),
-					sectname:  strings.TrimRight(sectname, "\x00"),
-					addr:      addr, size: size,
-					offset: offset, align: align,
-					reloff: reloff, nreloc: nreloc,
-					flags:     flags,
-					reserved1: reserved1, reserved2: reserved2,
-					idx: len(sections) + 1,
-				})
-				secOff += sectSize64
-			}
-
-		case LC_SYMTAB:
-			symoff, _ = r.U32(pos + 8)
-			nsyms, _ = r.U32(pos + 12)
-			stroff, _ = r.U32(pos + 16)
-			strsize, _ = r.U32(pos + 20)
-		}
-
-		pos += int(cmdsize)
-	}
-
-	// ── Build ObjectSection list ──────────────────────────────────────────────
-
-	skipSection := func(seg, sect string, flags uint32) bool {
-		if seg+"/"+sect == "__TEXT/__eh_frame" {
-			return false
-		}
-		stype := flags & 0xFF
-		return stype == S_SYMBOL_STUBS ||
-			stype == S_NON_LAZY_SYMBOL_POINTERS ||
-			stype == S_LAZY_SYMBOL_POINTERS
-	}
-
-	for _, s := range sections {
-		elfName := machoToELFSection(s.segname, s.sectname)
-		sflags := machoSectionFlags(s.segname, s.flags)
-		skip := skipSection(s.segname, s.sectname, s.flags)
-
-		var secData []byte
-		if sflags&SecBSS == 0 && s.size > 0 && s.offset > 0 {
-			end := int(s.offset) + int(s.size)
-			if end <= len(data) {
-				secData = make([]byte, s.size)
-				copy(secData, data[s.offset:end])
-			}
-		}
-
-		align := uint64(1)
-		if s.align <= 30 {
-			align = 1 << s.align
-		}
-
-		obj.Sections = append(obj.Sections, &ObjectSection{
-			Name:     elfName,
-			Flags:    sflags,
-			Data:     secData,
-			Size:     s.size,
-			Align:    align,
-			RawType:  s.flags & 0xFF,
-			RawFlags: uint64(s.flags),
-			Index:    s.idx,
-			Skip:     skip,
-		})
-	}
-
-	// ── Parse symbol table ────────────────────────────────────────────────────
-
-	if nsyms > 0 && symoff > 0 && stroff > 0 {
-		for i := uint32(0); i < nsyms; i++ {
-			soff := int(symoff) + int(i)*nlist64Size
-			strx, err := r.U32(soff)
+		if sh.stype != shtNobits && sh.size > 0 {
+			sec.Data, err = r.slice(int(sh.offset), int(sh.size))
 			if err != nil {
-				break
+				return nil, fmt.Errorf("object %q: section %q data: %w", name, secName, err)
 			}
-			ntype, _ := r.U8(soff + 4)
-			nsect, _ := r.U8(soff + 5)
-			ndesc, _ := r.U16(soff + 6)
-			nvalue, _ := r.U64(soff + 8)
-
-			if ntype&N_STAB != 0 {
-				obj.Symbols = append(obj.Symbols, nil)
-				continue
-			}
-
-			symName := ""
-			if strx < strsize {
-				symName, _ = r.CString(int(stroff)+int(strx), int(strsize-strx))
-			}
-
-			binding := BindLocal
-			if ntype&N_EXT != 0 {
-				binding = BindGlobal
-			}
-			if ndesc&N_WEAK_REF != 0 || ndesc&N_WEAK_DEF != 0 {
-				binding = BindWeak
-			}
-
-			symType := ntype & N_TYPE
-			sectionIdx := SymSecUndef
-			sectionName := ""
-
-			switch symType {
-			case N_UNDF:
-				sectionIdx = SymSecUndef
-			case N_ABS:
-				sectionIdx = SymSecAbs
-				sectionName = "*ABS*"
-			case N_SECT:
-				if nsect > 0 && int(nsect) <= len(sections) {
-					s := sections[nsect-1]
-					sectionIdx = int(nsect)
-					sectionName = machoToELFSection(s.segname, s.sectname)
-				}
-			default:
-				obj.Symbols = append(obj.Symbols, nil)
-				continue
-			}
-
-			obj.Symbols = append(obj.Symbols, &ObjectSymbol{
-				Name:        symName,
-				Value:       nvalue,
-				Binding:     binding,
-				SectionIdx:  sectionIdx,
-				SectionName: sectionName,
-			})
 		}
+		sections[i] = sec
 	}
 
-	// ── Parse relocations ─────────────────────────────────────────────────────
+	// ── Parse .symtab ─────────────────────────────────────────────────────────
 
-	for _, s := range sections {
-		if s.nreloc == 0 || s.reloff == 0 {
+	var symbols []*ObjectSymbol
+
+	for _, sec := range sections {
+		if sec == nil || sec.RawType != shtSymtab {
 			continue
 		}
-
-		var secData []byte
-		if s.offset > 0 && s.size > 0 {
-			end := int(s.offset) + int(s.size)
-			if end <= len(data) {
-				secData = data[s.offset:end]
+		sh := shdrs[sec.Index]
+		if int(sh.link) >= len(sections) || sections[sh.link] == nil {
+			return nil, fmt.Errorf("object %q: .symtab sh_link=%d invalid", name, sh.link)
+		}
+		strtabSec := sections[sh.link]
+		strtab := strtabSec.Data
+		if strtab == nil {
+			strtabSh := shdrs[sh.link]
+			strtab, err = r.slice(int(strtabSh.offset), int(strtabSh.size))
+			if err != nil {
+				return nil, fmt.Errorf("object %q: reading strtab: %w", name, err)
 			}
 		}
 
-		var pendingAddend int64
-		hasPending := false
+		n := int(sh.size) / symEntSize
+		symbols = make([]*ObjectSymbol, n)
+		sr := newReader(sec.Data)
 
-		for j := uint32(0); j < s.nreloc; j++ {
-			roff := int(s.reloff) + int(j)*relocEntrySize
-			if roff+8 > len(data) {
-				break
-			}
-			raddr := int32(binary.LittleEndian.Uint32(data[roff:]))
-			rinfo := binary.LittleEndian.Uint32(data[roff+4:])
+		for i := range symbols {
+			base := i * symEntSize
+			nameOff, _ := sr.u32(base + symoff_name)
+			info := sec.Data[base+symoff_info]
+			other := sec.Data[base+symoff_other]
+			shndx, _ := sr.u16(base + symoff_shndx)
+			value, _ := sr.u64(base + symoff_value)
+			size, _ := sr.u64(base + symoff_size)
 
-			symnum := rinfo & 0xFFFFFF
-			pcrel := (rinfo >> 24) & 0x1
-			rlen := (rinfo >> 25) & 0x3
-			extern := (rinfo >> 27) & 0x1
-			rtype := (rinfo >> 28) & 0xF
+			symName, _ := cstr(strtab, nameOff)
 
-			if cpuType == CPU_TYPE_ARM64 && rtype == ARM64_RELOC_ADDEND {
-				pendingAddend = int64(int32(symnum))
-				hasPending = true
-				continue
-			}
-
-			// ARM64 instruction relocations encode nothing useful in the
-			// instruction word — the assembler leaves placeholder bits that
-			// must not be interpreted as an addend. Only ARM64_RELOC_UNSIGNED
-			// (absolute data pointer) actually stores an addend in the bytes.
-			// AMD64 PC-relative relocs store −4 (next-instruction bias) which
-			// the patch functions expect, so we always read those.
-			isARM64InstrReloc := cpuType == CPU_TYPE_ARM64 &&
-				rtype != ARM64_RELOC_UNSIGNED
-
-			addend := int64(0)
-			if !isARM64InstrReloc && int(raddr) < len(secData) {
-				switch rlen {
-				case 2:
-					if int(raddr)+4 <= len(secData) {
-						addend = int64(int32(binary.LittleEndian.Uint32(secData[raddr:])))
-					}
-				case 3:
-					if int(raddr)+8 <= len(secData) {
-						addend = int64(binary.LittleEndian.Uint64(secData[raddr:]))
-					}
+			secIdx := SymSecUndef
+			secName := ""
+			switch {
+			case shndx == shnUndef:
+				secIdx = SymSecUndef
+				secName = ""
+			case shndx == shnAbs:
+				secIdx = SymSecAbs
+				secName = "*ABS*"
+			case shndx == shnCommon:
+				secIdx = SymSecCommon
+				secName = "*COMMON*"
+			case shndx == shnXindex:
+				secIdx = SymSecUndef // extended idx not common in .o files
+			case shndx >= shnLoreserve:
+				secIdx = SymSecUndef
+			default:
+				secIdx = int(shndx)
+				if int(shndx) < len(sections) && sections[shndx] != nil {
+					secName = sections[shndx].Name
 				}
 			}
-			if hasPending {
-				addend += pendingAddend
-				hasPending = false
-			}
 
-			symIdx := uint32(0)
-			if extern != 0 {
-				symIdx = symnum + 1
+			symbols[i] = &ObjectSymbol{
+				Name:        symName,
+				Value:       value,
+				Size:        size,
+				Binding:     elfBinding(stBind(info)),
+				Type:        elfSymType(stType(info)),
+				Vis:         other & 0x3,
+				SectionIdx:  secIdx,
+				SectionName: secName,
 			}
+		}
+		break // at most one SHT_SYMTAB
+	}
 
-			packedType := rtype | (rlen << 8) | (pcrel << 16)
-			obj.Relocs = append(obj.Relocs, &ObjectReloc{
-				TargetSectionIdx: s.idx,
-				Offset:           uint64(raddr),
-				SymIdx:           symIdx,
-				Type:             packedType,
+	// ── Parse RELA sections ───────────────────────────────────────────────────
+
+	var relocs []*ObjectReloc
+
+	for _, sec := range sections {
+		if sec == nil || sec.RawType != shtRela {
+			continue
+		}
+		sh := shdrs[sec.Index]
+		n := int(sh.size) / relaEntrySize
+		sr := newReader(sec.Data)
+		for i := 0; i < n; i++ {
+			base := i * relaEntrySize
+			offset, _ := sr.u64(base + relaoff_offset)
+			info, _ := sr.u64(base + relaoff_info)
+			addend, _ := sr.i64(base + relaoff_addend)
+			relocs = append(relocs, &ObjectReloc{
+				TargetSectionIdx: int(sh.info),
+				Offset:           offset,
+				SymIdx:           relaSymIdx(info),
+				Type:             relaType(info),
 				Addend:           addend,
 			})
 		}
 	}
 
-	return obj, nil
+	return &Object{
+		Name:     name,
+		Machine:  machine,
+		EFlags:   eflags,
+		Sections: sections,
+		Symbols:  symbols,
+		Relocs:   relocs,
+	}, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
