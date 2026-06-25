@@ -38,7 +38,7 @@ func (l *Layout) SectionByName(name string) (*MergedSection, bool) {
 }
 
 // layoutPageSize is the 4 KiB page / PT_LOAD segment alignment.
-const layoutPageSize = uint64(0x1000)
+const layoutPageSize = uint64(0x4000) // 16 KiB (Apple Silicon standard)
 
 // MergeSections groups input sections from all objects by name and
 // concatenates their data, respecting per-section alignment requirements.
