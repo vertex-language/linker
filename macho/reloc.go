@@ -61,7 +61,6 @@ func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc
 	return p.Apply(outSec.Data, patchOff, rel.Type, P, uint64(S), rel.Addend)
 }
 
-
 func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout *Layout) (int64, error) {
 	// Section-relative relocation (r_extern=0): SecRelNum is the 1-based
 	// Mach-O section index; resolve to that section's output VA + piece offset.
@@ -93,6 +92,34 @@ func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout 
 	if raw == nil || raw.Name == "" {
 		return 0, nil // section-relative
 	}
+
+	// ── FIX: Resolve local symbols directly ──────────────────────────────
+	// Local symbols are skipped during global SymbolTable ingestion. When an
+	// r_extern=1 relocation targets a local symbol (like ARM64 page relocs),
+	// we must resolve its address directly using its internal section offset.
+	if raw.Binding == BindLocal {
+		if raw.SectionIdx > 0 && raw.SectionIdx < len(obj.Sections) {
+			sec := obj.Sections[raw.SectionIdx]
+			if sec != nil {
+				ms, ok := layout.SectionByName(sec.Name)
+				if ok {
+					for _, p := range ms.Pieces {
+						if p.Obj == obj && p.Sec == sec {
+							// Symbol address = final section VA + piece offset + symbol offset
+							return int64(ms.VAddr + p.Offset + raw.Value), nil
+						}
+					}
+					return int64(ms.VAddr + raw.Value), nil
+				}
+			}
+		}
+		if raw.SectionIdx == SymSecAbs {
+			return int64(raw.Value), nil
+		}
+		return 0, fmt.Errorf("local symbol %q lacks valid section mapping", raw.Name)
+	}
+	// ─────────────────────────────────────────────────────────────────────
+
 	sym := symtab.Lookup(raw.Name)
 	if sym == nil {
 		if raw.Binding == BindWeak {
