@@ -242,18 +242,18 @@ func (s *Slice) signatureRegionStart() int64 {
 
 // embedSignature writes the super blob into the slice at codeLimit, then
 // patches the LC_CODE_SIGNATURE load command and the __LINKEDIT segment to
-// reflect the new size. If the slice's backing buffer is too small it is
-// replaced with a fresh allocation; if it's too large, it is truncated.
+// reflect the new size.
 func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
 	need := codeLimit + int64(len(super))
-	
-	// Ensure the slice is exactly `need` bytes long, dropping trailing garbage
-	if int64(cap(s.Bytes)) >= need {
-		s.Bytes = s.Bytes[:need]
-	} else {
+
+	// Reallocate if we need to grow. Checking `len` instead of `cap` 
+	// prevents accidentally overwriting adjacent slices in fat binaries.
+	if need > int64(len(s.Bytes)) {
 		grown := make([]byte, need)
 		copy(grown, s.Bytes[:codeLimit])
 		s.Bytes = grown
+	} else {
+		s.Bytes = s.Bytes[:need]
 	}
 	s.Size = need
 
@@ -270,16 +270,20 @@ func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
 	}
 
 	// Patch __LINKEDIT segment_command_64:
-	//   cmd(4) cmdsize(4) segname(16) vmaddr(8) vmsize(8) fileoff(8) filesize(8)
-	//   filesize is at +48; vmsize is at +32.
 	if s.linkEdit != nil {
 		leOff := s.linkEdit.cmdOff
 		newFileSize := uint64(need) - s.linkEdit.FileOff
-		if newFileSize > s.linkEdit.VMSize {
-			bo.PutUint64(s.Bytes[leOff+32:], newFileSize) // vmsize
-		}
-		bo.PutUint64(s.Bytes[leOff+48:], newFileSize) // filesize
+		
+		// CRITICAL FIX: macOS strictly requires segment vmsize to be 
+		// page-aligned (16KB / 0x4000 on Apple Silicon). Setting it to an 
+		// exact byte boundary causes an immediate SIGKILL on launch.
+		alignedVMSize := (newFileSize + 0x3FFF) &^ 0x3FFF
+		
+		bo.PutUint64(s.Bytes[leOff+32:], alignedVMSize) // vmsize
+		bo.PutUint64(s.Bytes[leOff+48:], newFileSize)   // filesize
+		
 		s.linkEdit.FileSize = newFileSize
+		s.linkEdit.VMSize = alignedVMSize
 	}
 
 	return nil
