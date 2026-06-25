@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"crypto/sha256"
 )
 
 func emitMachO(req *emitRequest, arch Arch) ([]byte, error) {
