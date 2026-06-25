@@ -3,7 +3,6 @@ package codesign
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 )
 
