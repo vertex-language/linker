@@ -113,6 +113,18 @@ func (e *emitter) classifySections() {
 			e.textSecs = append(e.textSecs, ms)
 		}
 	}
+	// Sort by VAddr so computeRanges correctly identifies the highest-addressed
+	// section as `last`. PLT stubs are injected after MergeSections and end up
+	// at the tail of Layout.Sections regardless of their actual VAddr, so
+	// without sorting, `last` would be __stubs (at ~0x1000040c0) rather than
+	// __const (at 0x100008000), causing textVMSize to be computed too small
+	// and dyld to reject the binary with "section end beyond segment end".
+	sort.Slice(e.textSecs, func(i, j int) bool {
+		return e.textSecs[i].VAddr < e.textSecs[j].VAddr
+	})
+	sort.Slice(e.dataSecs, func(i, j int) bool {
+		return e.dataSecs[i].VAddr < e.dataSecs[j].VAddr
+	})
 }
 
 // ── Step 2: compute segment ranges ───────────────────────────────────────────
