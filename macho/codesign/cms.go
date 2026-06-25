@@ -4,20 +4,25 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"math/big"
+	"strings"
 	"time"
 )
 
 // OIDs used in Apple's CMS code signatures.
 var (
-	oidSignedData     = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}
-	oidData           = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
-	oidContentType    = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}
-	oidMessageDigest  = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 4}
-	oidSigningTime    = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 5}
-	oidSHA256         = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
-	oidRSAEncryption  = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
+	oidSignedData      = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}
+	oidData            = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
+	oidContentType     = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}
+	oidMessageDigest   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 4}
+	oidSigningTime     = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 5}
+	oidSHA256          = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
+	oidRSAEncryption   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
 	oidECDSAWithSHA256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}
 	// Apple "cdhashes as plist" signed attribute.
 	oidAppleCDHashPlist = asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 9, 1}
@@ -98,8 +103,162 @@ func buildCMS(id *Identity, cdBytes []byte, cdHashes [][]byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// ... assemble signerInfo, signedData, outer ContentInfo (elided for brevity:
-	// fills issuerAndSerial from id.Leaf, attaches signedAttrDER under tag:0,
-	// embeds id.Leaf + intermediates in Certificates, marshals to DER) ...
-	return assembleSignedData(id, md, signedAttrDER, sig, sigAlg)
+	return assembleSignedData(id, signedAttrDER, sig, sigAlg)
+}
+
+// -----------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------
+
+// cdHashesPlist encodes the cdhashes as an Apple plist XML array of <data>
+// elements, as expected by the oidAppleCDHashPlist signed attribute.
+func cdHashesPlist(cdHashes [][]byte) []byte {
+	var sb strings.Builder
+	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	sb.WriteString("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ")
+	sb.WriteString("\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+	sb.WriteString("<plist version=\"1.0\">\n<array>\n")
+	for _, h := range cdHashes {
+		sb.WriteString("\t<data>")
+		sb.WriteString(base64.StdEncoding.EncodeToString(h))
+		sb.WriteString("</data>\n")
+	}
+	sb.WriteString("</array>\n</plist>")
+	return []byte(sb.String())
+}
+
+// rawAttr wraps an already-DER-encoded attribute value in a one-element
+// SET, producing an attribute ready for inclusion in signedAttrs.
+func rawAttr(oid asn1.ObjectIdentifier, value []byte) attribute {
+	setDER, err := asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSet,
+		IsCompound: true,
+		Bytes:      value,
+	})
+	if err != nil {
+		panic("codesign: rawAttr marshal: " + err.Error())
+	}
+	return attribute{
+		Type:   oid,
+		Values: asn1.RawValue{FullBytes: setDER},
+	}
+}
+
+// mustMarshal DER-encodes v and panics on error.
+func mustMarshal(v interface{}) []byte {
+	b, err := asn1.Marshal(v)
+	if err != nil {
+		panic("codesign: mustMarshal: " + err.Error())
+	}
+	return b
+}
+
+// marshalAttrSet encodes attrs as a DER SET (tag 0x31) for use as the
+// signed-attributes input to the signature hash (RFC 5652 §5.4).
+func marshalAttrSet(attrs []attribute) ([]byte, error) {
+	var inner []byte
+	for _, a := range attrs {
+		b, err := asn1.Marshal(a)
+		if err != nil {
+			return nil, fmt.Errorf("codesign: marshal attribute %v: %w", a.Type, err)
+		}
+		inner = append(inner, b...)
+	}
+	return asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassUniversal,
+		Tag:        asn1.TagSet,
+		IsCompound: true,
+		Bytes:      inner,
+	})
+}
+
+// signDigest signs the pre-hashed digest with the identity's key and returns
+// the signature bytes along with the appropriate CMS AlgorithmIdentifier.
+func signDigest(id *Identity, digest []byte) ([]byte, pkix.AlgorithmIdentifier, error) {
+	var sigAlg pkix.AlgorithmIdentifier
+	switch {
+	case id.isECDSA():
+		sigAlg = pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}
+	default: // RSA
+		sigAlg = pkix.AlgorithmIdentifier{Algorithm: oidRSAEncryption}
+	}
+	sig, err := id.Key.Sign(rand.Reader, digest, crypto.SHA256)
+	if err != nil {
+		return nil, pkix.AlgorithmIdentifier{}, fmt.Errorf("codesign: sign: %w", err)
+	}
+	return sig, sigAlg, nil
+}
+
+// assembleSignedData builds the complete CMS SignedData DER and wraps it in
+// the PKCS#7 BlobWrapper envelope.
+//
+// signedAttrDER must carry tag 0x31 (SET); this function re-tags it to 0xa0
+// ([0] IMPLICIT) for the on-wire SignerInfo encoding per RFC 5652 §5.3.
+func assembleSignedData(id *Identity, signedAttrDER, sig []byte, sigAlg pkix.AlgorithmIdentifier) ([]byte, error) {
+	// Issuer name from the leaf certificate.
+	issuerRaw, err := asn1.Marshal(id.Leaf.Issuer.ToRDNSequence())
+	if err != nil {
+		return nil, fmt.Errorf("codesign: marshal issuer: %w", err)
+	}
+
+	// RFC 5652 §5.3: signedAttrs in SignerInfo use [0] IMPLICIT (0xa0), not
+	// the 0x31 SET tag used when computing the signature hash.
+	implicitAttrs := make([]byte, len(signedAttrDER))
+	copy(implicitAttrs, signedAttrDER)
+	implicitAttrs[0] = 0xa0
+
+	si := signerInfo{
+		Version: 1,
+		SID: issuerAndSerial{
+			Issuer: asn1.RawValue{FullBytes: issuerRaw},
+			Serial: id.Leaf.SerialNumber,
+		},
+		DigestAlgorithm:    pkix.AlgorithmIdentifier{Algorithm: oidSHA256},
+		SignedAttrs:        asn1.RawValue{FullBytes: implicitAttrs},
+		SignatureAlgorithm: sigAlg,
+		Signature:          sig,
+	}
+
+	// Concatenate raw DER for leaf + any intermediates.
+	var certBytes []byte
+	for _, c := range append([]*x509.Certificate{id.Leaf}, id.Intermediates...) {
+		certBytes = append(certBytes, c.Raw...)
+	}
+
+	sd := signedData{
+		Version: 1,
+		DigestAlgorithms: []pkix.AlgorithmIdentifier{
+			{Algorithm: oidSHA256},
+		},
+		ContentInfo: contentInfo{ContentType: oidData},
+		Certificates: asn1.RawValue{
+			Class:      asn1.ClassContextSpecific,
+			Tag:        0,
+			IsCompound: true,
+			Bytes:      certBytes,
+		},
+		SignerInfos: []signerInfo{si},
+	}
+
+	sdDER, err := asn1.Marshal(sd)
+	if err != nil {
+		return nil, fmt.Errorf("codesign: marshal SignedData: %w", err)
+	}
+
+	outer := outerContentInfo{
+		ContentType: oidSignedData,
+		Content: asn1.RawValue{
+			Class:      asn1.ClassContextSpecific,
+			Tag:        0,
+			IsCompound: true,
+			Bytes:      sdDER,
+		},
+	}
+	outerDER, err := asn1.Marshal(outer)
+	if err != nil {
+		return nil, fmt.Errorf("codesign: marshal outer ContentInfo: %w", err)
+	}
+
+	return genericBlob(csmagicBlobWrapper, outerDER), nil
 }

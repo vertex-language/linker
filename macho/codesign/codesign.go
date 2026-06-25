@@ -6,13 +6,6 @@ import (
 	"io"
 )
 
-// Page size used for code hashing: 4 KiB, matching the ARM64 and x86-64
-// hardware page size on macOS.
-const (
-	pageSizeBits = 12
-	pageSize     = 1 << pageSizeBits // 4096
-)
-
 // -----------------------------------------------------------------------
 // On-disk struct sizes (all fields big-endian).
 //
