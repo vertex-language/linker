@@ -240,9 +240,33 @@ func (s *Slice) signatureRegionStart() int64 {
 	return int64(s.linkEdit.FileOff + s.linkEdit.FileSize)
 }
 
-// embedSignature writes the super blob into the slice at codeLimit, then
-// patches the LC_CODE_SIGNATURE load command and the __LINKEDIT segment to
-// reflect the new size.
+// PatchHeaders updates the load commands for the new signature size.
+// MUST be called before page hashes are computed.
+func (s *Slice) PatchHeaders(sigSize int, codeLimit int64) {
+	bo := s.order()
+	need := codeLimit + int64(sigSize)
+
+	if s.csCmd != nil {
+		off := s.csCmd.Offset
+		bo.PutUint32(s.Bytes[off+8:], uint32(codeLimit))
+		bo.PutUint32(s.Bytes[off+12:], uint32(sigSize))
+	}
+
+	if s.linkEdit != nil {
+		leOff := s.linkEdit.cmdOff
+		newFileSize := uint64(need) - s.linkEdit.FileOff
+		// macOS requires __LINKEDIT vmsize to be page-aligned
+		alignedVMSize := (newFileSize + 0x3FFF) &^ uint64(0x3FFF)
+		
+		bo.PutUint64(s.Bytes[leOff+32:], alignedVMSize) // vmsize
+		bo.PutUint64(s.Bytes[leOff+48:], newFileSize)   // filesize
+		
+		s.linkEdit.FileSize = newFileSize
+		s.linkEdit.VMSize = alignedVMSize
+	}
+}
+
+// embedSignature simply appends the blob to the slice.
 func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
 	need := codeLimit + int64(len(super))
 
@@ -256,26 +280,6 @@ func (s *Slice) embedSignature(super []byte, codeLimit int64) error {
 	s.Size = need
 
 	copy(s.Bytes[codeLimit:], super)
-
-	bo := s.order()
-
-	if s.csCmd != nil {
-		off := s.csCmd.Offset
-		bo.PutUint32(s.Bytes[off+8:], uint32(codeLimit))
-		bo.PutUint32(s.Bytes[off+12:], uint32(len(super)))
-	}
-
-	if s.linkEdit != nil {
-		leOff := s.linkEdit.cmdOff
-		newFileSize := uint64(need) - s.linkEdit.FileOff
-		// macOS requires __LINKEDIT vmsize to be page-aligned (16 KB on Apple Silicon).
-		alignedVMSize := (newFileSize + 0x3FFF) &^ uint64(0x3FFF)
-		bo.PutUint64(s.Bytes[leOff+32:], alignedVMSize) // vmsize
-		bo.PutUint64(s.Bytes[leOff+48:], newFileSize)   // filesize
-		s.linkEdit.FileSize = newFileSize
-		s.linkEdit.VMSize = alignedVMSize
-	}
-
 	return nil
 }
 

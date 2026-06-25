@@ -206,6 +206,48 @@ func signSlice(s *Slice, opts Options) error {
 		l.V3("    hash:         %s", hex.EncodeToString(entHash))
 	}
 
+	// ── PRE-PASS: Determine Signature Size ────────────────────────────────────
+	// We must patch the Mach-O header before hashing Page 0. We build a dummy
+	// CodeDirectory using zero-filled hashes to find the exact final size.
+	nPages := int((codeLimit + pageSize - 1) / pageSize)
+	dummyHashes := make([][]byte, nPages)
+	hashSize := int(hashFor(ht).Size())
+	for i := range dummyHashes {
+		dummyHashes[i] = make([]byte, hashSize)
+	}
+
+	dummyCD := buildCodeDirectory(cdParams{
+		identifier:    opts.Identifier,
+		teamID:        opts.TeamID,
+		flags:         flags,
+		hashType:      ht,
+		pageBits:      pageSizeBits,
+		codeLimit:     codeLimit,
+		execBase:      s.textOff,
+		execLimit:     s.textSize,
+		execFlags:     execFlags,
+		codeHashes:    dummyHashes,
+		specialHashes: special,
+	})
+
+	dummyAll := append([]blob{{slot: csslotCodeDirectory, data: dummyCD}}, components...)
+
+	if opts.Identity != nil {
+		// For production CMS, generate a dummy signature to reserve the correct byte length.
+		dummyCDHash := cdHash(dummyCD, ht)
+		dummyCMS, err := buildCMS(opts.Identity, dummyCD, [][]byte{dummyCDHash})
+		if err != nil {
+			return err
+		}
+		dummyAll = append(dummyAll, blob{slot: csslotSignature, data: dummyCMS})
+	}
+
+	sortBlobs(dummyAll)
+	expectedSigSize := len(assembleSuperBlob(dummyAll))
+
+	// Patch the Mach-O header BEFORE hashing!
+	s.PatchHeaders(expectedSigSize, codeLimit)
+
 	// ── Code-page hashes ──────────────────────────────────────────────────────
 	tHash := time.Now()
 	codeHashes, err := s.pageHashes(codeLimit, ht)
@@ -320,6 +362,8 @@ func signSlice(s *Slice, opts Options) error {
 	}
 
 	// ── Embed ──────────────────────────────────────────────────────────────────
+	// At this point, embedSignature should only be appending the bytes,
+	// as s.PatchHeaders() already updated the LC_CODE_SIGNATURE & __LINKEDIT sizes.
 	if err := s.embedSignature(super, codeLimit); err != nil {
 		return err
 	}
