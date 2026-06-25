@@ -62,8 +62,12 @@ func Sign(out []byte, data io.Reader, id string, codeSize, textOff, textSize int
 	cdSize := sz - int64(superBlobSize+blobIndexSize)
 
 	// ── CodeDirectory flags ──────────────────────────────────────────────
-	// CS_ADHOC | CS_LINKER_SIGNED  matches what the Darwin linker sets for
-	// ad-hoc binaries and is the combination the kernel expects.
+	// CS_ADHOC only.  CS_LINKER_SIGNED is only valid for the minimal
+	// linker-emitted signature (nSpecialSlots=0, no Requirements blob).
+	// This function produces that same minimal layout, so CS_LINKER_SIGNED
+	// is also set here to match exactly what the Darwin linker emits.
+	// (sign.go / signSlice does NOT set CS_LINKER_SIGNED because it
+	// produces the full codesign layout with a Requirements blob.)
 	flags := csAdhoc | csLinkerSigned
 
 	var execSegFlags uint64
@@ -84,39 +88,40 @@ func Sign(out []byte, data io.Reader, id string, codeSize, textOff, textSize int
 	// ── Write CodeDirectory fixed header (version 0x20400, 88 bytes) ────
 	b = putU32be(b, csmagicCodeDirectory)
 	b = putU32be(b, uint32(cdSize))
-	b = putU32be(b, csSupportsExecSeg)   // version
+	b = putU32be(b, csSupportsExecSeg)    // version
 	b = putU32be(b, flags)
-	b = putU32be(b, uint32(hashOff))     // hashOffset  (from CD start)
-	b = putU32be(b, uint32(idOff))       // identOffset (from CD start)
-	b = putU32be(b, 0)                   // nSpecialSlots — none for ad-hoc
-	b = putU32be(b, uint32(nhashes))     // nCodeSlots
-	b = putU32be(b, uint32(codeSize))    // codeLimit
-	b = putU8(b, sha256.Size)            // hashSize
-	b = putU8(b, csHashTypeSHA256)       // hashType
-	b = putU8(b, 0)                      // platform (0 = not a platform binary)
-	b = putU8(b, pageSizeBits)           // pageSize = log2(4096) = 12
-	b = putU32be(b, 0)                   // spare2
+	b = putU32be(b, uint32(hashOff))      // hashOffset  (from CD start)
+	b = putU32be(b, uint32(idOff))        // identOffset (from CD start)
+	b = putU32be(b, 0)                    // nSpecialSlots — none for linker ad-hoc
+	b = putU32be(b, uint32(nhashes))      // nCodeSlots
+	b = putU32be(b, uint32(codeSize))     // codeLimit
+	b = putU8(b, sha256.Size)             // hashSize
+	b = putU8(b, csHashTypeSHA256)        // hashType
+	b = putU8(b, 0)                       // platform (0 = not a platform binary)
+	b = putU8(b, pageSizeBits)            // pageSize = log2(4096) = 12
+	b = putU32be(b, 0)                    // spare2
 	// v0x20100
-	b = putU32be(b, 0)                   // scatterOffset (unused)
+	b = putU32be(b, 0)                    // scatterOffset (unused)
 	// v0x20200
-	b = putU32be(b, 0)                   // teamOffset (no team ID for ad-hoc)
+	b = putU32be(b, 0)                    // teamOffset (no team ID for ad-hoc)
 	// v0x20300
-	b = putU32be(b, 0)                   // spare3
-	b = putU64be(b, 0)                   // codeLimit64 (0 = use 32-bit codeLimit)
+	b = putU32be(b, 0)                    // spare3
+	b = putU64be(b, 0)                    // codeLimit64 (0 = use 32-bit codeLimit)
 	// v0x20400
-	b = putU64be(b, uint64(textOff))     // execSegBase
-	b = putU64be(b, uint64(textSize))    // execSegLimit
-	b = putU64be(b, execSegFlags)        // execSegFlags
+	b = putU64be(b, uint64(textOff))      // execSegBase
+	b = putU64be(b, uint64(textSize))     // execSegLimit
+	b = putU64be(b, execSegFlags)         // execSegFlags
 
 	// ── Write identifier C-string ────────────────────────────────────────
 	b = puts(b, []byte(id))
 	b = putU8(b, 0) // NUL terminator
 
 	// ── Hash each 4 KiB page and write into code slots ───────────────────
-	// We read codeSize bytes from data in pageSize chunks.  The last chunk
-	// may be short; SHA-256 is computed over the actual bytes in the page,
-	// padded to the full page size with zeroes — matching what the kernel
-	// does when it maps the final partial page.
+	// Each page is hashed over exactly its real bytes — for full pages that
+	// is 4096 bytes; for the final short page it is (codeSize % pageSize)
+	// bytes only.  Zero-padding the last page would produce a different hash
+	// from what the kernel computes when it validates the mapped pages, and
+	// from what Apple's codesign and the Go toolchain both emit.
 	var pageBuf [pageSize]byte
 	remaining := codeSize
 	h := sha256.New()
@@ -126,17 +131,12 @@ func Sign(out []byte, data io.Reader, id string, codeSize, textOff, textSize int
 		if n > remaining {
 			n = remaining
 		}
-		// Read exactly n bytes.
 		if _, err := io.ReadFull(data, pageBuf[:n]); err != nil {
 			panic("codesign.Sign: short read from data: " + err.Error())
 		}
-		// Zero the remainder of the page buffer for the last (short) page.
-		for i := n; i < pageSize; i++ {
-			pageBuf[i] = 0
-		}
 		h.Reset()
-		h.Write(pageBuf[:pageSize])
-		digest := h.Sum(nil) // 32 bytes
+		h.Write(pageBuf[:n]) // hash only actual bytes; never zero-pad
+		digest := h.Sum(nil)
 		b = puts(b, digest)
 		remaining -= n
 	}

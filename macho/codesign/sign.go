@@ -20,6 +20,14 @@ type Options struct {
 }
 
 // SignFile signs the Mach-O at path in place. It mirrors `codesign --sign`.
+//
+// The updated binary is written to a sibling temp file and then renamed into
+// place.  This is critical on Apple Silicon: the kernel caches code signatures
+// per vnode.  Overwriting the file in-place (same inode) can leave the kernel
+// serving the stale cached signature from a previous failed execution.
+// rename(2) replaces the directory entry atomically and forces the kernel to
+// evaluate the new signature on the next exec — the same technique used
+// internally by codesign_allocate.
 func SignFile(path string, opts Options) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -32,12 +40,22 @@ func SignFile(path string, opts Options) error {
 	if err != nil {
 		return err
 	}
+
 	info, _ := os.Stat(path)
 	mode := os.FileMode(0o755)
 	if info != nil {
 		mode = info.Mode()
 	}
-	return os.WriteFile(path, out, mode)
+
+	tmp := path + ".__codesign_tmp"
+	if err := os.WriteFile(tmp, out, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // SignImage signs every slice of a (fat or thin) image and returns new bytes.
@@ -70,10 +88,17 @@ func signSlice(s *Slice, opts Options) error {
 	ht := s.hashType(opts)
 	codeLimit := s.signatureRegionStart()
 
-	// Flags: ad-hoc gets CS_ADHOC|CS_LINKER_SIGNED; production drops adhoc.
+	// Flags: ad-hoc signing uses CS_ADHOC only.
+	//
+	// CS_LINKER_SIGNED must NOT be set here.  It is only valid for the
+	// minimal linker-emitted signature (nSpecialSlots=0, no Requirements
+	// blob, single CodeDirectory).  This tool produces a full codesign-style
+	// layout that always includes a Requirements blob (nSpecialSlots >= 2).
+	// Mixing CS_LINKER_SIGNED with that structure causes the kernel to reject
+	// the binary with SIGKILL.  Apple's codesign --sign - sets CS_ADHOC only.
 	var flags uint32
 	if opts.Identity == nil {
-		flags = csAdhoc | csLinkerSigned
+		flags = csAdhoc
 	}
 	if opts.Hardened {
 		flags |= csRuntime
@@ -143,9 +168,12 @@ func signSlice(s *Slice, opts Options) error {
 	return s.embedSignature(super, codeLimit)
 }
 
-// pageHashes hashes each 4 KiB page of the slice over [0, codeLimit). The final
-// short page is hashed over only its real bytes (no zero padding) — matching
-// what codesign emits (the kernel maps the partial page the same way).
+// pageHashes hashes each 4 KiB page of the slice over [0, codeLimit).
+//
+// Each page is hashed over exactly its real bytes.  For full pages that is
+// 4096 bytes; for the final short page it is (codeLimit % pageSize) bytes
+// only.  This matches Apple's codesign, the Darwin linker, and the Go
+// toolchain — all hash the actual bytes, never zero-padded to a full page.
 func (s *Slice) pageHashes(codeLimit int64, ht uint8) ([][]byte, error) {
 	h := hashFor(ht).New()
 	var out [][]byte
@@ -155,7 +183,7 @@ func (s *Slice) pageHashes(codeLimit int64, ht uint8) ([][]byte, error) {
 			end = codeLimit
 		}
 		h.Reset()
-		h.Write(s.Bytes[off:end])
+		h.Write(s.Bytes[off:end]) // exact bytes only; no zero padding
 		out = append(out, h.Sum(nil))
 	}
 	return out, nil
