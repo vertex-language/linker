@@ -258,8 +258,6 @@ func BuildBindInfo(
 			}
 		}
 
-		// Always emit the dylib ordinal (simplified; a production encoder would
-		// suppress repeated identical ordinals).
 		if ordinal > 0 && ordinal <= 15 {
 			buf = append(buf, BIND_OPCODE_SET_DYLIB_ORDINAL_IMM|uint8(ordinal))
 		} else {
@@ -277,8 +275,14 @@ func BuildBindInfo(
 			buf = append(buf, BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB|uint8(dataSegIndex))
 			buf = appendULEB128(buf, segOff)
 		} else {
-			buf = append(buf, BIND_OPCODE_ADD_ADDR_ULEB)
-			buf = appendULEB128(buf, segOff-prevSegOff)
+			// DO_BIND implicitly advances the cursor by gotEntrySize after
+			// writing each slot, so subtract that from the delta to avoid
+			// skipping one GOT entry per symbol.
+			delta := segOff - prevSegOff - gotEntrySize
+			if delta != 0 {
+				buf = append(buf, BIND_OPCODE_ADD_ADDR_ULEB)
+				buf = appendULEB128(buf, delta)
+			}
 		}
 		prevSegOff = segOff
 		firstEntry = false
