@@ -263,3 +263,15 @@ func pltSymNames(syms []PLTEntry) []string {
 	}
 	return out
 }
+
+func (l *Linker) AddCachedDylib(name string, symbols []string) {
+	exports := make(map[string]*SharedExport, len(symbols))
+	for _, sym := range symbols {
+		exports[sym] = &SharedExport{Name: sym, Binding: BindGlobal, Type: SymTypeFunc}
+	}
+	l.shared = append(l.shared, &SharedLib{
+		Name:    name,
+		Soname:  name,
+		Exports: exports,
+	})
+}
