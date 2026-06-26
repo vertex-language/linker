@@ -972,11 +972,17 @@ func findInstallPath(soname string) string {
 		"libpthread.dylib":  "/usr/lib/libpthread.dylib",
 		"libm.dylib":        "/usr/lib/libm.dylib",
 		"libobjc.A.dylib":   "/usr/lib/libobjc.A.dylib",
+		"libobjc.dylib":     "/usr/lib/libobjc.A.dylib",
 		"libdyld.dylib":     "/usr/lib/system/libdyld.dylib",
 		"libc++.1.dylib":    "/usr/lib/libc++.1.dylib",
 	}
 	if path, ok := known[soname]; ok {
 		return path
+	}
+	// ObjC framework paths: "Foundation.framework/Foundation"
+	//   → "/System/Library/Frameworks/Foundation.framework/Foundation"
+	if strings.Contains(soname, ".framework/") {
+		return "/System/Library/Frameworks/" + soname
 	}
 	return "/usr/lib/" + soname
 }
