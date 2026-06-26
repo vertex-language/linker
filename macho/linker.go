@@ -267,7 +267,8 @@ func pltSymNames(syms []PLTEntry) []string {
 func (l *Linker) AddCachedDylib(name string, symbols []string) {
 	exports := make(map[string]*SharedExport, len(symbols))
 	for _, sym := range symbols {
-		exports[sym] = &SharedExport{Name: sym, Binding: BindGlobal, Type: SymTypeFunc}
+		mangled := "_" + sym // Mach-O C symbols have underscore prefix
+		exports[mangled] = &SharedExport{Name: mangled, Binding: BindGlobal, Type: SymTypeFunc}
 	}
 	l.shared = append(l.shared, &SharedLib{
 		Name:    name,
