@@ -356,24 +356,21 @@ func (e *emitter) strName(strx uint32) string {
 
 func (e *emitter) computeLinkEditOffsets() {
 	off := e.linkEditFileOff
-	e.rebaseOff = off; off += uint64(len(e.rebaseBlob))
-	e.bindOff   = off; off += uint64(len(e.bindBlob))
-	e.exportOff = off; off += uint64(len(e.exportBlob))
-	e.symOff    = off; off += uint64(len(e.symBlob))
-	e.indirectOff = off; off += uint64(len(e.indirectBlob))
+	e.rebaseOff = off; off = alignUp64(off+uint64(len(e.rebaseBlob)), 8)
+	e.bindOff   = off; off = alignUp64(off+uint64(len(e.bindBlob)), 8)
+	e.exportOff = off; off = alignUp64(off+uint64(len(e.exportBlob)), 8)
+	e.symOff    = off; off = alignUp64(off+uint64(len(e.symBlob)), 8)
+	e.indirectOff = off; off = alignUp64(off+uint64(len(e.indirectBlob)), 8)
 	e.strOff    = off; off += uint64(len(e.strBlob))
 
-	// code signature — always last, 16-byte aligned
 	isExec := e.req.OutputType != OutputShared
 	if isExec {
 		off = alignUp64(off, 16)
 		e.codeSignOff = off
 		nPages := (off + 0xFFF) >> 12
-		// SuperBlob(20) + BlobIndex(8) + CodeDirectory(88) + identifier(6) + hashes
 		e.codeSignSize = alignUp64(20+8+88+6+nPages*32, 8)
 		off += e.codeSignSize
 	}
-
 	e.linkEditSize = off - e.linkEditFileOff
 }
 
@@ -583,11 +580,11 @@ func (e *emitter) serialize(lc []byte) []byte {
 
 	// LINKEDIT blobs
 	fo := e.linkEditFileOff
-	copy(out[fo:], e.rebaseBlob);   fo += uint64(len(e.rebaseBlob))
-	copy(out[fo:], e.bindBlob);     fo += uint64(len(e.bindBlob))
-	copy(out[fo:], e.exportBlob);   fo += uint64(len(e.exportBlob))
-	copy(out[fo:], e.symBlob);      fo += uint64(len(e.symBlob))
-	copy(out[fo:], e.indirectBlob); fo += uint64(len(e.indirectBlob))
+	copy(out[fo:], e.rebaseBlob);   fo = alignUp64(fo+uint64(len(e.rebaseBlob)), 8)
+	copy(out[fo:], e.bindBlob);     fo = alignUp64(fo+uint64(len(e.bindBlob)), 8)
+	copy(out[fo:], e.exportBlob);   fo = alignUp64(fo+uint64(len(e.exportBlob)), 8)
+	copy(out[fo:], e.symBlob);      fo = alignUp64(fo+uint64(len(e.symBlob)), 8)
+	copy(out[fo:], e.indirectBlob); fo = alignUp64(fo+uint64(len(e.indirectBlob)), 8)
 	copy(out[fo:], e.strBlob)
 
 	// ad-hoc code signature — computed over all bytes before this slot
