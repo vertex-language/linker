@@ -246,6 +246,12 @@ func (l *Linker) walkSharedDeps() error {
 				continue
 			}
 			seen[soname] = true
+			// API Set virtual DLLs (api-ms-win-* and ext-ms-win-*) have no
+			// real file on disk — the Windows loader resolves them at runtime
+			// via apisetschema.dll. Skip them during the dep walk.
+			if isAPISet(soname) {
+				continue
+			}
 			dep, err := l.findShared(soname, cur.Rpaths)
 			if err != nil {
 				return fmt.Errorf("loading %s (needed by %s): %w", soname, cur.Soname, err)
@@ -257,13 +263,21 @@ func (l *Linker) walkSharedDeps() error {
 	return nil
 }
 
+// isAPISet reports whether soname is a Windows API Set virtual DLL.
+// These have no real file on disk; the OS loader resolves them at runtime
+// through the API Set schema. Attempting to open them as files always fails.
+func isAPISet(soname string) bool {
+	s := strings.ToLower(soname)
+	return strings.HasPrefix(s, "api-ms-win-") ||
+		strings.HasPrefix(s, "ext-ms-win-")
+}
+
 func (l *Linker) findShared(soname string, rpaths []string) (*SharedLib, error) {
 	searchDirs := append(append([]string{}, rpaths...), l.libPaths...)
 	searchDirs = append(searchDirs,
-		"/usr/lib", "/usr/local/lib",
-		"/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
-		"/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
-		"/lib64", "/usr/lib64", "/lib",
+		`C:\Windows\System32`,
+		`C:\Windows\SysWOW64`,
+		`C:\Windows\System`,
 	)
 	for _, dir := range searchDirs {
 		path := filepath.Join(dir, soname)
