@@ -44,7 +44,7 @@ func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc
 
 	outSec, ok := layout.SectionByName(inputSec.Name)
 	if !ok {
-		return nil // section was GC'd or is linker-internal
+		return nil
 	}
 
 	var pieceOff uint64
@@ -67,14 +67,14 @@ func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc
 	}
 
 	P := outSec.VAddr + pieceOff + rel.Offset
-	S, err := resolveRelocSym(rel, obj, symtab)
+	S, err := resolveRelocSym(layout, rel, obj, symtab)
 	if err != nil {
 		return err
 	}
 	return patcher.Apply(outSec.Data, patchOff, rel.Type, P, uint64(S), rel.Addend)
 }
 
-func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable) (int64, error) {
+func resolveRelocSym(layout *Layout, rel *ObjectReloc, obj *Object, symtab *SymbolTable) (int64, error) {
 	if rel.SymIdx == 0 {
 		return 0, nil
 	}
@@ -83,8 +83,27 @@ func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable) (int64,
 	}
 	raw := obj.Symbols[rel.SymIdx]
 	if raw == nil || raw.Name == "" {
-		return 0, nil // section-relative; caller handles via A+P
+		return 0, nil
 	}
+
+	// Local symbols are not in the global symbol table — resolve them
+	// directly through the layout using their section and value offset.
+	if raw.Binding == BindLocal {
+		if raw.SectionName == "" {
+			return int64(raw.Value), nil
+		}
+		ms, ok := layout.SectionByName(raw.SectionName)
+		if !ok {
+			return 0, fmt.Errorf("local symbol %q: output section %q not found", raw.Name, raw.SectionName)
+		}
+		for _, p := range ms.Pieces {
+			if p.Obj == obj && p.Sec.Name == raw.SectionName {
+				return int64(ms.VAddr + p.Offset + raw.Value), nil
+			}
+		}
+		return int64(ms.VAddr + raw.Value), nil
+	}
+
 	sym := symtab.Lookup(raw.Name)
 	if sym == nil {
 		if raw.Binding == BindWeak {
