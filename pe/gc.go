@@ -19,6 +19,22 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 		return
 	}
 
+	// If none of the roots resolve to a known section, skip GC entirely rather
+	// than silently pruning everything. Guards against a misconfigured entry
+	// point wiping out all allocatable sections before symbol resolution runs.
+	anyRootFound := false
+	for _, name := range roots {
+		if sym := symtab.Lookup(name); sym != nil && sym.RawSym != nil {
+			if _, ok := layout.SectionByName(sym.RawSym.SectionName); ok {
+				anyRootFound = true
+				break
+			}
+		}
+	}
+	if !anyRootFound {
+		return
+	}
+
 	type secKey struct {
 		obj  *Object
 		name string
