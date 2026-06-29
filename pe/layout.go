@@ -98,6 +98,13 @@ func MergeSections(objects []*Object) (*Layout, error) {
 // AssignLayout assigns VAddr and FileOffset to every merged section.
 // Sections are grouped into RX, RO, and RW PT_LOAD segments; non-allocatable
 // sections (debug info etc.) are placed at end-of-file.
+//
+// Each allocatable section's VAddr is rounded up to the page size, not merely
+// to ms.Align: builder.go emits one PE section header per MergedSection and
+// copies VAddr straight into VirtualAddress, and PE requires every section RVA
+// to be a multiple of SectionAlignment (0x1000). File offsets are independent
+// (builder.go repacks them at peFileAlign and never reads ms.FileOffset), so
+// only the virtual addresses need the coarser alignment.
 func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 	if baseVA == 0 && outputType == OutputExec {
 		baseVA = 0x400000
@@ -128,8 +135,11 @@ func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 			vaddr = alignUp(vaddr, layoutPageSize)
 		}
 		for _, ms := range secs {
+			// VAddr must land on a SectionAlignment boundary so the PE loader
+			// accepts each emitted section header; ms.Align (16/8/4) would let
+			// siblings share a page and produce sub-page RVAs.
+			vaddr = alignUp(vaddr, layoutPageSize)
 			fileOff = alignUp(fileOff, ms.Align)
-			vaddr = alignUp(vaddr, ms.Align)
 			ms.FileOffset = fileOff
 			ms.VAddr = vaddr
 			if ms.Flags&SecBSS == 0 {
