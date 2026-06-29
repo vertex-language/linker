@@ -120,21 +120,22 @@ func (l *Linker) Link() ([]byte, error) {
 		return nil, fmt.Errorf("link: merge: %w", err)
 	}
 
-	// Phase 3b: PLT injection.
+	// Phase 3b: collect PLT symbols from object relocations before GC.
+	// Collection is safe here because it reads raw object relocs which GC
+	// does not touch. Injection is deferred until after GC so the synthetic
+	// .plt / .got.plt / .rela.plt sections are never subject to elimination.
 	pltSyms := CollectPLTSymbols(symtab, allObjects)
+
+	// Phase 4: dead-code elimination.
+	GC(layout, symtab, allObjects, l.outputType, l.entry)
+
+	// Phase 4b: inject PLT and IAT sections after GC.
 	if len(pltSyms) > 0 {
 		InjectPLTSections(layout, pltSyms)
-	}
-
-	// Phase 3c: PE IAT layout and .got.plt resize.
-	if len(pltSyms) > 0 {
 		if err := l.injectIATSections(layout, pltSyms); err != nil {
 			return nil, fmt.Errorf("link: inject IAT: %w", err)
 		}
 	}
-
-	// Phase 4: dead-code elimination.
-	GC(layout, symtab, allObjects, l.outputType, l.entry)
 
 	// Phase 5: virtual address and file-offset assignment.
 	if err := AssignLayout(l.outputType, layout, 0); err != nil {
