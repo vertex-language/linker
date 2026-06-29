@@ -99,12 +99,19 @@ func MergeSections(objects []*Object) (*Layout, error) {
 // Sections are grouped into RX, RO, and RW PT_LOAD segments; non-allocatable
 // sections (debug info etc.) are placed at end-of-file.
 //
-// Each allocatable section's VAddr is rounded up to the page size, not merely
-// to ms.Align: builder.go emits one PE section header per MergedSection and
-// copies VAddr straight into VirtualAddress, and PE requires every section RVA
-// to be a multiple of SectionAlignment (0x1000). File offsets are independent
-// (builder.go repacks them at peFileAlign and never reads ms.FileOffset), so
-// only the virtual addresses need the coarser alignment.
+// Virtual addresses must tile contiguously from the first section up to
+// SizeOfImage with no gaps: the NT loader validates, during image-section
+// creation, that each section's VirtualAddress equals the previous section's
+// VirtualAddress plus its page-rounded VirtualSize. A hole (an RVA range
+// covered by no section header) is rejected with ERROR_BAD_EXE_FORMAT (Win32
+// 193, "not a valid Win32 application") before any code runs. We therefore
+// advance vaddr by the page-rounded section size, not the raw size — two
+// sub-page sections must still occupy a full page each, because builder.go
+// emits one PE section header per MergedSection and each header's RVA must sit
+// on a SectionAlignment boundary.
+//
+// File offsets are independent of this: builder.go repacks them at peFileAlign
+// and never reads ms.FileOffset, so raw data stays densely packed at ms.Align.
 func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 	if baseVA == 0 && outputType == OutputExec {
 		baseVA = 0x400000
@@ -132,12 +139,12 @@ func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 		}
 		if newSegment {
 			fileOff = alignUp(fileOff, layoutPageSize)
-			vaddr = alignUp(vaddr, layoutPageSize)
+			// vaddr is already page-aligned after the previous group (each
+			// section advances it by a page-rounded size), so no re-align here.
 		}
 		for _, ms := range secs {
-			// VAddr must land on a SectionAlignment boundary so the PE loader
-			// accepts each emitted section header; ms.Align (16/8/4) would let
-			// siblings share a page and produce sub-page RVAs.
+			// VAddr must land on a SectionAlignment boundary and the sections
+			// must tile without gaps, so advance by the page-rounded size.
 			vaddr = alignUp(vaddr, layoutPageSize)
 			fileOff = alignUp(fileOff, ms.Align)
 			ms.FileOffset = fileOff
@@ -145,7 +152,7 @@ func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 			if ms.Flags&SecBSS == 0 {
 				fileOff += ms.Size
 			}
-			vaddr += ms.Size
+			vaddr += alignUp(ms.Size, layoutPageSize)
 		}
 	}
 
