@@ -19,9 +19,6 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 		return
 	}
 
-	// If none of the roots resolve to a known section, skip GC entirely rather
-	// than silently pruning everything. Guards against a misconfigured entry
-	// point wiping out all allocatable sections before symbol resolution runs.
 	anyRootFound := false
 	for _, name := range roots {
 		if sym := symtab.Lookup(name); sym != nil && sym.RawSym != nil {
@@ -100,7 +97,10 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 
 	kept := layout.Sections[:0]
 	for _, ms := range layout.Sections {
-		if ms.Flags&SecAlloc == 0 || reachable[ms] {
+		// Keep non-allocatable sections (debug info etc.) and reachable sections
+		// unconditionally. Also keep sections that the OS loader requires but
+		// that code never directly references via relocations.
+		if ms.Flags&SecAlloc == 0 || reachable[ms] || isEssentialSection(ms.Name) {
 			kept = append(kept, ms)
 		}
 	}
@@ -110,4 +110,15 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 	for _, ms := range kept {
 		layout.secByName[ms.Name] = ms
 	}
+}
+
+// isEssentialSection reports whether a section must survive GC regardless of
+// reachability. These sections are not referenced by code relocations but are
+// required by the OS loader or debugger at runtime.
+func isEssentialSection(name string) bool {
+	switch name {
+	case ".pdata", ".xdata": // Windows x64 structured exception handling (SEH)
+		return true
+	}
+	return false
 }

@@ -240,11 +240,11 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 	le32(ws+8,  uint32(peSectAlign))
 	le32(ws+12, uint32(peFileAlign))
 	le16(ws+16, 6)
-	le16(ws+18, 0)
+	le16(ws+18, 1) // MinorOSVersion: 6.1 = Windows 7 minimum
 	le16(ws+20, 0)
 	le16(ws+22, 0)
 	le16(ws+24, 6)
-	le16(ws+26, 0)
+	le16(ws+26, 1) // MinorSubsystemVersion: 6.1 = Windows 7 minimum
 	le32(ws+28, 0)
 	le32(ws+32, sizeOfImage)
 	le32(ws+36, sizeOfHeaders)
