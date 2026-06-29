@@ -199,8 +199,15 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 		fileChars |= imageFileDLL
 	}
 
+	// DllCharacteristics: only advertise ASLR (DYNAMIC_BASE / HIGH_ENTROPY_VA)
+	// when a .reloc section was actually emitted. A PIE/DLL image that claims
+	// HIGH_ENTROPY_VA but carries no relocation table is contradictory — the
+	// loader cannot honor mandatory high-entropy placement without relocations
+	// and rejects the image with ERROR_BAD_EXE_FORMAT (Win32 error 193). When
+	// there are no base relocations (e.g. an all-RIP-relative / IAT-only
+	// program), the image loads at its preferred base with these bits clear.
 	dllChars := imageDllCharNXCompat | imageDllCharTerminalServerAware
-	if req.OutputType != OutputExec {
+	if req.OutputType != OutputExec && relocSect != nil {
 		dllChars |= imageDllCharHighEntropyVA | imageDllCharDynamicBase
 	}
 
