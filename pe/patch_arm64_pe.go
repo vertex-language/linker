@@ -57,7 +57,7 @@ func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, 
 			return fmt.Errorf("ARM64 BRANCH26 overflow: delta=%d", delta)
 		}
 		insn := binary.LittleEndian.Uint32(data[off:])
-		insn  = (insn &^ 0x03FFFFFF) | (uint32(delta) & 0x03FFFFFF)
+		insn = (insn &^ 0x03FFFFFF) | (uint32(delta) & 0x03FFFFFF)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64Branch19:
@@ -69,7 +69,7 @@ func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, 
 			return fmt.Errorf("ARM64 BRANCH19 overflow: delta=%d", delta)
 		}
 		insn := binary.LittleEndian.Uint32(data[off:])
-		insn  = (insn &^ (0x7FFFF << 5)) | ((uint32(delta) & 0x7FFFF) << 5)
+		insn = (insn &^ (0x7FFFF << 5)) | ((uint32(delta) & 0x7FFFF) << 5)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64Branch14:
@@ -81,22 +81,22 @@ func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, 
 			return fmt.Errorf("ARM64 BRANCH14 overflow: delta=%d", delta)
 		}
 		insn := binary.LittleEndian.Uint32(data[off:])
-		insn  = (insn &^ (0x3FFF << 5)) | ((uint32(delta) & 0x3FFF) << 5)
+		insn = (insn &^ (0x3FFF << 5)) | ((uint32(delta) & 0x3FFF) << 5)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64PagebaseRel21:
 		if off+4 > len(data) {
 			return fmt.Errorf("ARM64 PAGEBASE_REL21 write at %d out of bounds", off)
 		}
-		target    := uint64(int64(S) + A)
+		target := uint64(int64(S) + A)
 		pageDelta := int64(target>>12) - int64(P>>12)
 		if pageDelta < -(1<<20) || pageDelta >= (1<<20) {
 			return fmt.Errorf("ARM64 ADRP page delta overflow: %d", pageDelta)
 		}
 		immlo := uint32(pageDelta & 0x3)
 		immhi := uint32((pageDelta >> 2) & 0x7FFFF)
-		insn  := binary.LittleEndian.Uint32(data[off:])
-		insn   = (insn &^ 0x60FFFFE0) | (immlo << 29) | (immhi << 5)
+		insn := binary.LittleEndian.Uint32(data[off:])
+		insn = (insn &^ 0x60FFFFE0) | (immlo << 29) | (immhi << 5)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64Rel21:
@@ -109,8 +109,8 @@ func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, 
 		}
 		immlo := uint32(delta & 0x3)
 		immhi := uint32((delta >> 2) & 0x7FFFF)
-		insn  := binary.LittleEndian.Uint32(data[off:])
-		insn   = (insn &^ 0x60FFFFE0) | (immlo << 29) | (immhi << 5)
+		insn := binary.LittleEndian.Uint32(data[off:])
+		insn = (insn &^ 0x60FFFFE0) | (immlo << 29) | (immhi << 5)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64PageOffset12A:
@@ -118,20 +118,20 @@ func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, 
 			return fmt.Errorf("ARM64 PAGEOFFSET_12A write at %d out of bounds", off)
 		}
 		imm12 := uint32(uint64(int64(S)+A) & 0xFFF)
-		insn  := binary.LittleEndian.Uint32(data[off:])
-		insn   = (insn &^ (0xFFF << 10)) | (imm12 << 10)
+		insn := binary.LittleEndian.Uint32(data[off:])
+		insn = (insn &^ (0xFFF << 10)) | (imm12 << 10)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64PageOffset12L:
 		if off+4 > len(data) {
 			return fmt.Errorf("ARM64 PAGEOFFSET_12L write at %d out of bounds", off)
 		}
-		insn    := binary.LittleEndian.Uint32(data[off:])
-		size    := insn >> 30
-		scale   := uint64(1 << size)
+		insn := binary.LittleEndian.Uint32(data[off:])
+		size := insn >> 30
+		scale := uint64(1 << size)
 		pageOff := uint64(int64(S)+A) & 0xFFF
-		imm12   := uint32(pageOff / scale)
-		insn     = (insn &^ (0xFFF << 10)) | (imm12 << 10)
+		imm12 := uint32(pageOff / scale)
+		insn = (insn &^ (0xFFF << 10)) | (imm12 << 10)
 		binary.LittleEndian.PutUint32(data[off:], insn)
 
 	case relARM64Section:
@@ -162,7 +162,7 @@ type arm64PLTPatcher struct {
 }
 
 func (p *arm64PLTPatcher) PatchPLT(
-	plt, gotPLT, relaPLT []byte,
+	plt, gotPLT []byte,
 	pltBase, gotBase uint64,
 	syms []PLTEntry,
 ) {
@@ -175,27 +175,27 @@ func (p *arm64PLTPatcher) PatchPLT(
 		gotResSlots = 3
 	)
 	for _, s := range syms {
-		slot    := p.iatLayout.SlotOf[s.Idx]
-		iatVA   := gotBase + uint64(gotResSlots+slot)*8
+		slot := p.iatLayout.SlotOf[s.Idx]
+		iatVA := gotBase + uint64(gotResSlots+slot)*8
 		thunkVA := pltBase + uint64(pltHdrSize+s.Idx*pltEntSz)
-		tOff    := pltHdrSize + s.Idx*pltEntSz
+		tOff := pltHdrSize + s.Idx*pltEntSz
 
 		thunkPage := thunkVA &^ uint64(0xFFF)
-		iatPage   := iatVA   &^ uint64(0xFFF)
+		iatPage := iatVA &^ uint64(0xFFF)
 		pageDelta := int64(iatPage>>12) - int64(thunkPage>>12)
-		immlo     := uint32(pageDelta & 0x3)
-		immhi     := uint32((pageDelta >> 2) & 0x7FFFF)
-		adrp      := uint32(0x90000011) | (immlo << 29) | (immhi << 5)
+		immlo := uint32(pageDelta & 0x3)
+		immhi := uint32((pageDelta >> 2) & 0x7FFFF)
+		adrp := uint32(0x90000011) | (immlo << 29) | (immhi << 5)
 
-		pageOff   := iatVA & 0xFFF
+		pageOff := iatVA & 0xFFF
 		scaledOff := uint32(pageOff / 8)
-		ldr       := uint32(0xF9400231) | (scaledOff << 10)
-		br        := uint32(0xD61F0220)
-		nop       := uint32(0xD503201F)
+		ldr := uint32(0xF9400231) | (scaledOff << 10)
+		br := uint32(0xD61F0220)
+		nop := uint32(0xD503201F)
 
-		binary.LittleEndian.PutUint32(plt[tOff:],    adrp)
-		binary.LittleEndian.PutUint32(plt[tOff+4:],  ldr)
-		binary.LittleEndian.PutUint32(plt[tOff+8:],  br)
+		binary.LittleEndian.PutUint32(plt[tOff:], adrp)
+		binary.LittleEndian.PutUint32(plt[tOff+4:], ldr)
+		binary.LittleEndian.PutUint32(plt[tOff+8:], br)
 		binary.LittleEndian.PutUint32(plt[tOff+12:], nop)
 
 		s.Sym.VAddr = thunkVA

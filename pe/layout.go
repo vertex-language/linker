@@ -95,23 +95,48 @@ func MergeSections(objects []*Object) (*Layout, error) {
 	return &Layout{Sections: sections, secByName: byKey}, nil
 }
 
+// AppendAllocSection places a newly generated allocatable section contiguously
+// after the highest allocated VAddr, using the same page-rounding rule as
+// AssignLayout. It is the single placement primitive for sections whose size
+// is only known after AssignLayout has run (e.g. .reloc, sized post-relocation).
+// File offset is left to the writer, which packs all sections in one pass.
+func (l *Layout) AppendAllocSection(name string, data []byte, flags SectionFlags, align uint64) *MergedSection {
+	var maxEnd uint64
+	for _, ms := range l.Sections {
+		if ms.Flags&SecAlloc == 0 {
+			continue
+		}
+		if end := ms.VAddr + alignUp(ms.Size, layoutPageSize); end > maxEnd {
+			maxEnd = end
+		}
+	}
+	sec := &MergedSection{
+		Name:  name,
+		Flags: flags | SecAlloc,
+		Data:  data,
+		Size:  uint64(len(data)),
+		Align: align,
+		VAddr: alignUp(maxEnd, layoutPageSize),
+	}
+	l.Sections = append(l.Sections, sec)
+	l.secByName[name] = sec
+	return sec
+}
+
 // AssignLayout assigns VAddr and FileOffset to every merged section.
 // Sections are grouped into RX, RO, and RW PT_LOAD segments; non-allocatable
 // sections (debug info etc.) are placed at end-of-file.
 //
-// Virtual addresses must tile contiguously from the first section up to
+// Virtual addresses tile contiguously from the first section up to
 // SizeOfImage with no gaps: the NT loader validates, during image-section
 // creation, that each section's VirtualAddress equals the previous section's
 // VirtualAddress plus its page-rounded VirtualSize. A hole (an RVA range
 // covered by no section header) is rejected with ERROR_BAD_EXE_FORMAT (Win32
-// 193, "not a valid Win32 application") before any code runs. We therefore
-// advance vaddr by the page-rounded section size, not the raw size — two
-// sub-page sections must still occupy a full page each, because builder.go
-// emits one PE section header per MergedSection and each header's RVA must sit
-// on a SectionAlignment boundary.
+// 193) before any code runs. We therefore advance vaddr by the page-rounded
+// section size, not the raw size.
 //
-// File offsets are independent of this: builder.go repacks them at peFileAlign
-// and never reads ms.FileOffset, so raw data stays densely packed at ms.Align.
+// File offsets are repacked densely by the writer at peFileAlign; ms.FileOffset
+// set here is advisory and never read by the writer.
 func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 	if baseVA == 0 && outputType == OutputExec {
 		baseVA = 0x400000
@@ -139,12 +164,8 @@ func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 		}
 		if newSegment {
 			fileOff = alignUp(fileOff, layoutPageSize)
-			// vaddr is already page-aligned after the previous group (each
-			// section advances it by a page-rounded size), so no re-align here.
 		}
 		for _, ms := range secs {
-			// VAddr must land on a SectionAlignment boundary and the sections
-			// must tile without gaps, so advance by the page-rounded size.
 			vaddr = alignUp(vaddr, layoutPageSize)
 			fileOff = alignUp(fileOff, ms.Align)
 			ms.FileOffset = fileOff

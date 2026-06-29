@@ -6,7 +6,7 @@ import (
 )
 
 // IATLayout records how PLT symbols are grouped into contiguous IAT slots
-// inside .got.plt (after the 3 reserved header entries).
+// inside .got.plt (after the reserved header entries).
 type IATLayout struct {
 	DLLOrder []string
 	SlotOf   []int
@@ -16,7 +16,7 @@ type IATLayout struct {
 
 func computeIATLayout(syms []PLTEntry) *IATLayout {
 	var dllOrder []string
-	dllSeen  := make(map[string]bool)
+	dllSeen := make(map[string]bool)
 	dllCount := make(map[string]int)
 
 	for _, s := range syms {
@@ -35,11 +35,11 @@ func computeIATLayout(syms []PLTEntry) *IATLayout {
 		slot += dllCount[dll] + 1
 	}
 
-	slotOf   := make([]int, len(syms))
+	slotOf := make([]int, len(syms))
 	localIdx := make(map[string]int)
 	for i, s := range syms {
-		dll        := dllName(s)
-		slotOf[i]   = dllStart[dll] + localIdx[dll]
+		dll := dllName(s)
+		slotOf[i] = dllStart[dll] + localIdx[dll]
 		localIdx[dll]++
 	}
 
@@ -52,7 +52,7 @@ func computeIATLayout(syms []PLTEntry) *IATLayout {
 }
 
 func (l *IATLayout) totalGOTSlots() int {
-	total := 3
+	total := gotReserved
 	for _, dll := range l.DLLOrder {
 		total += l.DLLCount[dll] + 1
 	}
@@ -66,227 +66,139 @@ func dllName(s PLTEntry) string {
 	return ""
 }
 
-func buildIdata(
-	req      *EmitRequest,
-	layout   *IATLayout,
-	coreBase uint64,
-) (body []byte, importDirRVA, importDirSize, iatRVA, iatSize uint32) {
+// ── Import table geometry ──────────────────────────────────────────────────
 
-	symtab := req.Symtab
-	gotSec, hasGot := req.Layout.SectionByName(".got.plt")
-	if !hasGot || layout == nil || len(layout.DLLOrder) == 0 {
-		return nil, 0, 0, 0, 0
+type idataSym struct {
+	name  string
+	idx   int
+	hnOff int // offset within the hint/name table
+}
+
+// idataGeom is the layout of the import directory, computed exactly once.
+// The pre-layout size estimate and the post-layout byte fill both read it,
+// so the two can never disagree.
+type idataGeom struct {
+	dllOrder        []string
+	dllStart        map[string]int
+	importTableSize int
+	iltOff          int
+	hnOff           int
+	dllNOff         int
+	total           int
+	dllSyms         map[string][]idataSym
+	dllNameOff      map[string]int
+	dllNameArea     []byte
+	nSyms           int
+}
+
+func (g idataGeom) size() int { return g.total }
+
+func computeIdataGeom(symtab *SymbolTable, pltSyms []string, lay *IATLayout) idataGeom {
+	g := idataGeom{
+		dllOrder:   lay.DLLOrder,
+		dllStart:   lay.DLLStart,
+		dllSyms:    make(map[string][]idataSym),
+		dllNameOff: make(map[string]int),
 	}
 
-	iatBaseRVA := toRVA(gotSec.VAddr, coreBase) + 3*8
-
-	nDLLs := len(layout.DLLOrder)
-
-	type impSym struct {
-		name string
-		hint uint16
-		dll  string
-		idx  int
-	}
-	var allImpSyms []impSym
-	for i, sname := range req.PLTSyms {
+	// Group by DLL in PLTSyms order, which equals IATLayout's localIdx order:
+	// ILT slot j then lines up with IAT slot dllStart+j and the PLT thunk that
+	// targets it. No sort required.
+	for i, sname := range pltSyms {
 		ts := symtab.Lookup(sname)
 		if ts == nil || ts.Lib == nil {
 			continue
 		}
-		allImpSyms = append(allImpSyms, impSym{
-			name: sname,
-			dll:  ts.Lib.Soname,
-			idx:  i,
-		})
+		dll := ts.Lib.Soname
+		g.dllSyms[dll] = append(g.dllSyms[dll], idataSym{name: sname, idx: i})
+		g.nSyms++
 	}
 
-	dllImpSyms := make(map[string][]impSym)
-	for _, is := range allImpSyms {
-		dllImpSyms[is.dll] = append(dllImpSyms[is.dll], is)
-	}
-	for dll := range dllImpSyms {
-		sort.Slice(dllImpSyms[dll], func(a, b int) bool {
-			return dllImpSyms[dll][a].idx < dllImpSyms[dll][b].idx
-		})
-	}
-
-	importTableSize := (nDLLs + 1) * sizeImportDesc
+	nDLLs := len(g.dllOrder)
+	g.importTableSize = (nDLLs + 1) * sizeImportDesc
+	g.iltOff = g.importTableSize
 
 	iltSize := 0
-	for _, dll := range layout.DLLOrder {
-		iltSize += (layout.DLLCount[dll] + 1) * 8
+	for _, dll := range g.dllOrder {
+		iltSize += (lay.DLLCount[dll] + 1) * 8
 	}
+	g.hnOff = g.iltOff + iltSize
 
-	type hnEntry struct {
-		hint   uint16
-		name   string
-		offset int
-	}
-	dllHNEntries := make(map[string][]hnEntry)
 	hnTotal := 0
-	for _, dll := range layout.DLLOrder {
-		for _, is := range dllImpSyms[dll] {
-			ent := hnEntry{hint: is.hint, name: is.name, offset: hnTotal}
-			sz := 2 + len(is.name) + 1
+	for _, dll := range g.dllOrder {
+		syms := g.dllSyms[dll]
+		for j := range syms {
+			syms[j].hnOff = hnTotal
+			sz := 2 + len(syms[j].name) + 1
 			if sz%2 != 0 {
 				sz++
 			}
 			hnTotal += sz
-			dllHNEntries[dll] = append(dllHNEntries[dll], ent)
+		}
+		g.dllSyms[dll] = syms
+	}
+	g.dllNOff = g.hnOff + hnTotal
+
+	for _, dll := range g.dllOrder {
+		g.dllNameOff[dll] = len(g.dllNameArea)
+		g.dllNameArea = append(g.dllNameArea, []byte(dll)...)
+		g.dllNameArea = append(g.dllNameArea, 0)
+		if len(g.dllNameArea)%2 != 0 {
+			g.dllNameArea = append(g.dllNameArea, 0)
 		}
 	}
 
-	dllNameOffsets := make(map[string]int)
-	dllNameArea    := make([]byte, 0)
-	for _, dll := range layout.DLLOrder {
-		dllNameOffsets[dll] = len(dllNameArea)
-		dllNameArea = append(dllNameArea, []byte(dll)...)
-		dllNameArea = append(dllNameArea, 0)
-		if len(dllNameArea)%2 != 0 {
-			dllNameArea = append(dllNameArea, 0)
-		}
-	}
+	g.total = g.dllNOff + len(g.dllNameArea)
+	return g
+}
 
-	iltOff    := importTableSize
-	hnOff     := iltOff + iltSize
-	dllNOff   := hnOff + hnTotal
-	totalSize := dllNOff + len(dllNameArea)
+// fillImports writes the import directory, ILT, hint/name table and DLL-name
+// area into the already-placed .idata section, and mirrors the name RVAs into
+// the .got.plt IAT slots so the table is valid before the loader binds it.
+// idataRVA is .idata's RVA; iatBaseRVA is the RVA of the first non-reserved
+// .got.plt slot.
+func fillImports(idata, got []byte, idataRVA, iatBaseRVA uint32, g idataGeom) (importDirSize, iatSize uint32) {
+	descPtr := 0
+	iltCursor := g.iltOff
+	for _, dll := range g.dllOrder {
+		syms := g.dllSyms[dll]
 
-	body = make([]byte, totalSize)
-
-	descPtr   := 0
-	iltCursor := iltOff
-	for _, dll := range layout.DLLOrder {
-		dllSymList := dllImpSyms[dll]
-
-		binary.LittleEndian.PutUint32(body[descPtr:], uint32(iltCursor))
-		binary.LittleEndian.PutUint32(body[descPtr+4:], 0)
-		binary.LittleEndian.PutUint32(body[descPtr+8:], 0xFFFFFFFF)
-		binary.LittleEndian.PutUint32(body[descPtr+12:], uint32(dllNOff+dllNameOffsets[dll]))
-		firstThunkRVA := iatBaseRVA + uint32(layout.DLLStart[dll])*8
-		binary.LittleEndian.PutUint32(body[descPtr+16:], firstThunkRVA)
+		binary.LittleEndian.PutUint32(idata[descPtr+0:], idataRVA+uint32(iltCursor)) // OriginalFirstThunk (ILT)
+		binary.LittleEndian.PutUint32(idata[descPtr+4:], 0)                          // TimeDateStamp
+		binary.LittleEndian.PutUint32(idata[descPtr+8:], 0xFFFFFFFF)                 // ForwarderChain
+		binary.LittleEndian.PutUint32(idata[descPtr+12:], idataRVA+uint32(g.dllNOff+g.dllNameOff[dll]))
+		binary.LittleEndian.PutUint32(idata[descPtr+16:], iatBaseRVA+uint32(g.dllStart[dll])*8) // FirstThunk (IAT)
 		descPtr += sizeImportDesc
 
-		for j := range dllSymList {
-			hnIdx := dllHNEntries[dll][j].offset
-			binary.LittleEndian.PutUint64(body[iltCursor:], uint64(hnOff+hnIdx))
+		iatSlot := g.dllStart[dll]
+		for j := range syms {
+			hnRVA := uint64(idataRVA + uint32(g.hnOff+syms[j].hnOff))
+			binary.LittleEndian.PutUint64(idata[iltCursor:], hnRVA)
+			if gOff := (gotReserved + iatSlot) * 8; gOff+8 <= len(got) {
+				binary.LittleEndian.PutUint64(got[gOff:], hnRVA)
+			}
 			iltCursor += 8
+			iatSlot++
 		}
-		binary.LittleEndian.PutUint64(body[iltCursor:], 0)
+		binary.LittleEndian.PutUint64(idata[iltCursor:], 0) // ILT terminator
 		iltCursor += 8
 	}
 
-	hnCursor := hnOff
-	for _, dll := range layout.DLLOrder {
-		for _, ent := range dllHNEntries[dll] {
-			binary.LittleEndian.PutUint16(body[hnCursor:], ent.hint)
-			copy(body[hnCursor+2:], ent.name)
-			body[hnCursor+2+len(ent.name)] = 0
-			sz := 2 + len(ent.name) + 1
-			if sz%2 != 0 {
-				sz++
-			}
-			hnCursor += sz
+	for _, dll := range g.dllOrder {
+		for _, s := range g.dllSyms[dll] {
+			off := g.hnOff + s.hnOff
+			binary.LittleEndian.PutUint16(idata[off:], 0) // hint
+			copy(idata[off+2:], s.name)
+			idata[off+2+len(s.name)] = 0
 		}
 	}
 
-	copy(body[dllNOff:], dllNameArea)
+	copy(idata[g.dllNOff:], g.dllNameArea)
 
-	importDirSize = uint32(importTableSize)
-	iatSize       = uint32((len(allImpSyms) + len(layout.DLLOrder)) * 8)
-	_ = nDLLs
-	return body, 0, importDirSize, iatBaseRVA, iatSize
+	return uint32(g.importTableSize), uint32((g.nSyms + len(g.dllOrder)) * 8)
 }
 
-func patchIdataRVAs(body []byte, layout *IATLayout, selfRVA uint32,
-	req *EmitRequest, iatBaseRVA uint32) {
-
-	symtab := req.Symtab
-
-	type impSym struct {
-		name string
-		dll  string
-		idx  int
-	}
-	var allImpSyms []impSym
-	for i, sname := range req.PLTSyms {
-		ts := symtab.Lookup(sname)
-		if ts == nil || ts.Lib == nil {
-			continue
-		}
-		allImpSyms = append(allImpSyms, impSym{name: sname, dll: ts.Lib.Soname, idx: i})
-	}
-	dllImpSyms := make(map[string][]impSym)
-	for _, is := range allImpSyms {
-		dllImpSyms[is.dll] = append(dllImpSyms[is.dll], is)
-	}
-	for dll := range dllImpSyms {
-		sort.Slice(dllImpSyms[dll], func(a, b int) bool {
-			return dllImpSyms[dll][a].idx < dllImpSyms[dll][b].idx
-		})
-	}
-
-	nDLLs           := len(layout.DLLOrder)
-	importTableSize := (nDLLs + 1) * sizeImportDesc
-
-	iltSize := 0
-	for _, dll := range layout.DLLOrder {
-		iltSize += (layout.DLLCount[dll] + 1) * 8
-	}
-
-	type hnEntry struct {
-		hint   uint16
-		name   string
-		offset int
-	}
-	dllHNEntries := make(map[string][]hnEntry)
-	hnTotal := 0
-	for _, dll := range layout.DLLOrder {
-		for _, is := range dllImpSyms[dll] {
-			ent := hnEntry{offset: hnTotal, name: is.name}
-			sz := 2 + len(is.name) + 1
-			if sz%2 != 0 {
-				sz++
-			}
-			hnTotal += sz
-			dllHNEntries[dll] = append(dllHNEntries[dll], ent)
-		}
-	}
-
-	dllNameOffsets := make(map[string]int)
-	cur := 0
-	for _, dll := range layout.DLLOrder {
-		dllNameOffsets[dll] = cur
-		cur += len(dll) + 1
-		if cur%2 != 0 {
-			cur++
-		}
-	}
-
-	iltOff  := importTableSize
-	hnOff   := iltOff + iltSize
-	dllNOff := hnOff + hnTotal
-
-	descPtr   := 0
-	iltCursor := iltOff
-	for _, dll := range layout.DLLOrder {
-		binary.LittleEndian.PutUint32(body[descPtr:], selfRVA+uint32(iltCursor))
-		binary.LittleEndian.PutUint32(body[descPtr+12:], selfRVA+uint32(dllNOff+dllNameOffsets[dll]))
-		descPtr   += sizeImportDesc
-		iltCursor += (layout.DLLCount[dll] + 1) * 8
-	}
-
-	iltCursor = iltOff
-	for _, dll := range layout.DLLOrder {
-		for j := range dllHNEntries[dll] {
-			hnOff64 := uint64(selfRVA + uint32(hnOff+dllHNEntries[dll][j].offset))
-			binary.LittleEndian.PutUint64(body[iltCursor:], hnOff64)
-			iltCursor += 8
-		}
-		iltCursor += 8
-	}
-}
+// ── Base relocations ───────────────────────────────────────────────────────
 
 func buildBaseRelocSection(sites []BaseRelocSite, coreBase uint64) []byte {
 	if len(sites) == 0 {

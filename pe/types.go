@@ -15,11 +15,12 @@ const (
 type SectionFlags uint32
 
 const (
-	SecAlloc SectionFlags = 1 << 0 // occupies memory at runtime
-	SecWrite SectionFlags = 1 << 1 // writable at runtime
-	SecExec  SectionFlags = 1 << 2 // executable
-	SecTLS   SectionFlags = 1 << 3 // thread-local storage
-	SecBSS   SectionFlags = 1 << 4 // no file bytes (zero-initialised)
+	SecAlloc   SectionFlags = 1 << 0 // occupies memory at runtime
+	SecWrite   SectionFlags = 1 << 1 // writable at runtime
+	SecExec    SectionFlags = 1 << 2 // executable
+	SecTLS     SectionFlags = 1 << 3 // thread-local storage
+	SecBSS     SectionFlags = 1 << 4 // no file bytes (zero-initialised)
+	SecDiscard SectionFlags = 1 << 5 // discardable at runtime (e.g. .reloc)
 )
 
 // ObjectSection is one section from an input object file.

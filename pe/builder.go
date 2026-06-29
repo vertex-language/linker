@@ -27,21 +27,22 @@ type peSection struct {
 	chars   uint32
 }
 
-func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
-	imgBase  := imageBaseFor(req.OutputType)
+// emitPE serialises an already-laid-out image. It is mechanical: section RVAs
+// come straight from Layout, file offsets are packed in a single pass, and
+// data directories are looked up from placed sections by name. It invents no
+// addresses and emits exactly the set of allocatable sections the layout placed.
+func emitPE(req *EmitRequest) ([]byte, error) {
+	imgBase := imageBaseFor(req.OutputType)
 	coreBase := coreBaseVA(req.OutputType)
-	machine  := uint16(imageMachineAMD64)
+	machine := uint16(imageMachineAMD64)
 	if req.Arch == ArchARM64 {
 		machine = imageMachineARM64
 	}
 
-	// ── 1. Collect allocatable output sections ────────────────────────────
+	// ── 1. Every allocatable section, in layout-assigned address order ────
 	var sects []*peSection
 	for _, ms := range req.Layout.Sections {
 		if ms.Flags&SecAlloc == 0 {
-			continue
-		}
-		if skipPESection(ms.Name) {
 			continue
 		}
 		ps := &peSection{
@@ -53,103 +54,32 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 			chars: secChars(ms.Flags),
 		}
 		if ms.Flags&SecBSS != 0 {
-			ps.data    = nil
-			ps.rawSize = 0
+			ps.data, ps.rawSize = nil, 0
 		} else {
 			ps.rawSize = uint32(alignUp64(uint64(len(ms.Data)), peFileAlign))
 		}
 		sects = append(sects, ps)
 	}
-
-	// ── 2. Build .idata (import table) ────────────────────────────────────
-	var idataSect *peSection
-	var importDirRVA, importDirSize, iatDirRVA, iatDirSize uint32
-	if iatLayout != nil && len(req.PLTSyms) > 0 {
-		got, hasGot := req.Layout.SectionByName(".got.plt")
-		if hasGot {
-			iatBaseRVA := toRVA(got.VAddr, coreBase) + 3*8
-			idataBytes, _, idSize, iatRVA, iatSz := buildIdata(req, iatLayout, coreBase)
-			importDirSize = idSize
-			iatDirRVA    = iatRVA
-			iatDirSize   = iatSz
-
-			lastRVA := uint32(0)
-			for _, ps := range sects {
-				end := ps.rva + uint32(alignUp64(uint64(ps.vsize), peSectAlign))
-				if end > lastRVA {
-					lastRVA = end
-				}
-			}
-			idataRVA    := alignUp32(lastRVA, uint32(peSectAlign))
-			importDirRVA = idataRVA
-
-			patchIdataRVAs(idataBytes, iatLayout, idataRVA, req, iatBaseRVA)
-
-			idataSect = &peSection{
-				name:    ".idata",
-				data:    idataBytes,
-				rva:     idataRVA,
-				vsize:   uint32(len(idataBytes)),
-				rawSize: uint32(alignUp64(uint64(len(idataBytes)), peFileAlign)),
-				chars:   imageSCNCntInitializedData | imageSCNMemRead | imageSCNMemWrite,
-			}
-			sects = append(sects, idataSect)
-		}
-	}
-
-	// ── 3. Build .reloc (base relocations for DLL / PIE) ──────────────────
-	var relocSect *peSection
-	var relocDirRVA, relocDirSize uint32
-	if req.OutputType != OutputExec && len(req.BaseRelocs) > 0 {
-		relocBytes := buildBaseRelocSection(req.BaseRelocs, coreBase)
-		if len(relocBytes) > 0 {
-			lastRVA := uint32(0)
-			for _, ps := range sects {
-				end := ps.rva + uint32(alignUp64(uint64(ps.vsize), peSectAlign))
-				if end > lastRVA {
-					lastRVA = end
-				}
-			}
-			rRVA         := alignUp32(lastRVA, uint32(peSectAlign))
-			relocDirRVA   = rRVA
-			relocDirSize  = uint32(len(relocBytes))
-			relocSect = &peSection{
-				name:    ".reloc",
-				data:    relocBytes,
-				rva:     rRVA,
-				vsize:   uint32(len(relocBytes)),
-				rawSize: uint32(alignUp64(uint64(len(relocBytes)), peFileAlign)),
-				chars:   imageSCNCntInitializedData | imageSCNMemRead | imageSCNMemDiscardable,
-			}
-			sects = append(sects, relocSect)
-		}
-	}
-
-	// ── 4. Sort sections by RVA ───────────────────────────────────────────
 	sort.Slice(sects, func(i, j int) bool { return sects[i].rva < sects[j].rva })
 
-	// ── 5. Assign file offsets ────────────────────────────────────────────
-	nSections  := len(sects)
+	// ── 2. File offsets — the writer's only placement responsibility ──────
+	nSections := len(sects)
 	headerSize := sizeDOSStub + sizePESig + sizeCOFFHdr + sizeOptHdr64 + nSections*sizeSectionHdr
-	firstFileOff := alignUp32(uint32(headerSize), uint32(peFileAlign))
-
-	fileOff := firstFileOff
+	fileOff := alignUp32(uint32(headerSize), uint32(peFileAlign))
 	for _, ps := range sects {
 		if ps.rawSize == 0 {
 			ps.fileOff = 0
-		} else {
-			ps.fileOff = fileOff
-			fileOff  += ps.rawSize
+			continue
 		}
+		ps.fileOff = fileOff
+		fileOff += ps.rawSize
 	}
 
-	// ── 6. Compute image metrics ──────────────────────────────────────────
+	// ── 3. Image metrics ──────────────────────────────────────────────────
 	sizeOfHeaders := uint32(alignUp64(uint64(headerSize), peFileAlign))
-
 	sizeOfImage := sizeOfHeaders
 	for _, ps := range sects {
-		end := alignUp32(ps.rva+ps.vsize, uint32(peSectAlign))
-		if end > sizeOfImage {
+		if end := alignUp32(ps.rva+ps.vsize, uint32(peSectAlign)); end > sizeOfImage {
 			sizeOfImage = end
 		}
 	}
@@ -181,14 +111,22 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 		}
 	}
 
-	// ── 6b. Locate .pdata for the exception directory ─────────────────────
-	var exceptionDirRVA, exceptionDirSize uint32
-	for _, ps := range sects {
-		if ps.ms != nil && ps.ms.Name == ".pdata" {
-			exceptionDirRVA = ps.rva
-			exceptionDirSize = ps.vsize
-			break
-		}
+	// ── 4. Data directories, derived from placed sections by name ─────────
+	var importDirRVA, importDirSize, iatDirRVA, iatDirSize uint32
+	if req.Imports != nil {
+		importDirRVA = req.Imports.ImportDirRVA
+		importDirSize = req.Imports.ImportDirSize
+		iatDirRVA = req.Imports.IATRVA
+		iatDirSize = req.Imports.IATSize
+	}
+
+	var exceptionDirRVA, exceptionDirSize, relocDirRVA, relocDirSize uint32
+	if ps := findSect(sects, ".pdata"); ps != nil {
+		exceptionDirRVA, exceptionDirSize = ps.rva, ps.vsize
+	}
+	relocPresent := false
+	if ps := findSect(sects, ".reloc"); ps != nil {
+		relocDirRVA, relocDirSize, relocPresent = ps.rva, ps.vsize, true
 	}
 
 	fileChars := imageFileExecutableImage | imageFileLargeAddressAware
@@ -199,29 +137,23 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 		fileChars |= imageFileDLL
 	}
 
-	// DllCharacteristics: only advertise ASLR (DYNAMIC_BASE / HIGH_ENTROPY_VA)
-	// when a .reloc section was actually emitted. A PIE/DLL image that claims
-	// HIGH_ENTROPY_VA but carries no relocation table is contradictory — the
-	// loader cannot honor mandatory high-entropy placement without relocations
-	// and rejects the image with ERROR_BAD_EXE_FORMAT (Win32 error 193). When
-	// there are no base relocations (e.g. an all-RIP-relative / IAT-only
-	// program), the image loads at its preferred base with these bits clear.
+	// Advertise ASLR only when a .reloc section was actually emitted: a PIE/DLL
+	// claiming HIGH_ENTROPY_VA with no relocation table is rejected by the
+	// loader with ERROR_BAD_EXE_FORMAT.
 	dllChars := imageDllCharNXCompat | imageDllCharTerminalServerAware
-	if req.OutputType != OutputExec && relocSect != nil {
+	if req.OutputType != OutputExec && relocPresent {
 		dllChars |= imageDllCharHighEntropyVA | imageDllCharDynamicBase
 	}
 
-	// ── 7. Serialise ──────────────────────────────────────────────────────
-	totalSize := int(fileOff)
-	buf       := make([]byte, totalSize)
-	put       := func(off int, b []byte) { copy(buf[off:], b) }
-	le16      := func(off int, v uint16) { binary.LittleEndian.PutUint16(buf[off:], v) }
-	le32      := func(off int, v uint32) { binary.LittleEndian.PutUint32(buf[off:], v) }
-	le64      := func(off int, v uint64) { binary.LittleEndian.PutUint64(buf[off:], v) }
+	// ── 5. Serialise ──────────────────────────────────────────────────────
+	buf := make([]byte, int(fileOff))
+	put := func(off int, b []byte) { copy(buf[off:], b) }
+	le16 := func(off int, v uint16) { binary.LittleEndian.PutUint16(buf[off:], v) }
+	le32 := func(off int, v uint32) { binary.LittleEndian.PutUint32(buf[off:], v) }
+	le64 := func(off int, v uint64) { binary.LittleEndian.PutUint64(buf[off:], v) }
 
 	put(0, dosStub[:])
-	buf[0x40] = 'P'
-	buf[0x41] = 'E'
+	buf[0x40], buf[0x41] = 'P', 'E'
 
 	coff := 0x44
 	le16(coff+0, machine)
@@ -236,15 +168,15 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 	le16(opt+0, imageNTOptionalHdr64Magic)
 	buf[opt+2] = 1
 	buf[opt+3] = 0
-	le32(opt+4,  sizeCode)
-	le32(opt+8,  sizeInitData)
+	le32(opt+4, sizeCode)
+	le32(opt+8, sizeInitData)
 	le32(opt+12, sizeUninitData)
 	le32(opt+16, entryRVA)
 	le32(opt+20, baseOfCode)
 
 	ws := opt + 24
-	le64(ws+0,  imgBase)
-	le32(ws+8,  uint32(peSectAlign))
+	le64(ws+0, imgBase)
+	le32(ws+8, uint32(peSectAlign))
 	le32(ws+12, uint32(peFileAlign))
 	le16(ws+16, 6)
 	le16(ws+18, 1) // MinorOSVersion: 6.1 = Windows 7 minimum
@@ -266,22 +198,22 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 	le32(ws+84, dirCount)
 
 	dd := opt + 112
-	le32(dd+dirImport*8,    importDirRVA)
-	le32(dd+dirImport*8+4,  importDirSize)
-	le32(dd+dirException*8,   exceptionDirRVA)
+	le32(dd+dirImport*8, importDirRVA)
+	le32(dd+dirImport*8+4, importDirSize)
+	le32(dd+dirException*8, exceptionDirRVA)
 	le32(dd+dirException*8+4, exceptionDirSize)
-	le32(dd+dirBaseReloc*8,   relocDirRVA)
+	le32(dd+dirBaseReloc*8, relocDirRVA)
 	le32(dd+dirBaseReloc*8+4, relocDirSize)
-	le32(dd+dirIAT*8,   iatDirRVA)
+	le32(dd+dirIAT*8, iatDirRVA)
 	le32(dd+dirIAT*8+4, iatDirSize)
 
 	shBase := opt + sizeOptHdr64
 	for i, ps := range sects {
 		sh := shBase + i*sizeSectionHdr
-		nameBytes := [8]byte{}
+		var nameBytes [8]byte
 		copy(nameBytes[:], ps.name)
 		put(sh, nameBytes[:])
-		le32(sh+8,  ps.vsize)
+		le32(sh+8, ps.vsize)
 		le32(sh+12, ps.rva)
 		le32(sh+16, ps.rawSize)
 		le32(sh+20, ps.fileOff)
@@ -296,8 +228,7 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 		if ps.rawSize == 0 || len(ps.data) == 0 {
 			continue
 		}
-		dst := buf[ps.fileOff : ps.fileOff+ps.rawSize]
-		copy(dst, ps.data)
+		copy(buf[ps.fileOff:ps.fileOff+ps.rawSize], ps.data)
 	}
 
 	return buf, nil
@@ -305,8 +236,13 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func skipPESection(name string) bool {
-	return name == ".rela.plt"
+func findSect(sects []*peSection, name string) *peSection {
+	for _, ps := range sects {
+		if ps.ms != nil && ps.ms.Name == name {
+			return ps
+		}
+	}
+	return nil
 }
 
 func truncateName(name string) string {
@@ -318,18 +254,22 @@ func truncateName(name string) string {
 
 func secChars(f SectionFlags) uint32 {
 	var ch uint32
-	if f&SecExec != 0 {
-		ch |= imageSCNCntCode | imageSCNMemExecute | imageSCNMemRead
-	} else if f&SecBSS != 0 {
-		ch |= imageSCNCntUninitializedData | imageSCNMemRead
+	switch {
+	case f&SecExec != 0:
+		ch = imageSCNCntCode | imageSCNMemExecute | imageSCNMemRead
+	case f&SecBSS != 0:
+		ch = imageSCNCntUninitializedData | imageSCNMemRead
 		if f&SecWrite != 0 {
 			ch |= imageSCNMemWrite
 		}
-	} else {
-		ch |= imageSCNCntInitializedData | imageSCNMemRead
+	default:
+		ch = imageSCNCntInitializedData | imageSCNMemRead
 		if f&SecWrite != 0 {
 			ch |= imageSCNMemWrite
 		}
+	}
+	if f&SecDiscard != 0 {
+		ch |= imageSCNMemDiscardable
 	}
 	return ch
 }

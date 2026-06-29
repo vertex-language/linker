@@ -6,7 +6,7 @@ const (
 	pltHeaderSize = 16
 	pltEntrySize  = 16
 	gotEntrySize  = 8
-	relaEntSize   = 24
+	gotReserved   = 3 // standard reserved .got.plt header slots
 )
 
 // PLTEntry pairs a shared symbol with its 0-based stub index (PLT0 not counted).
@@ -16,9 +16,10 @@ type PLTEntry struct {
 	Idx  int
 }
 
-// PLTPatcher writes arch+format-specific PLT stubs and dynamic reloc entries.
+// PLTPatcher writes arch-specific PLT thunks. PE imports resolve through the
+// IAT in .got.plt and the import directory — there is no ELF-style .rela.plt.
 type PLTPatcher interface {
-	PatchPLT(plt, gotPLT, relaPLT []byte, pltBase, gotBase uint64, syms []PLTEntry)
+	PatchPLT(plt, gotPLT []byte, pltBase, gotBase uint64, syms []PLTEntry)
 }
 
 // CollectPLTSymbols returns every kindShared symbol actually referenced by at
@@ -53,53 +54,42 @@ func CollectPLTSymbols(symtab *SymbolTable, objects []*Object) []PLTEntry {
 	return out
 }
 
-// InjectPLTSections appends placeholder .plt, .got.plt, and .rela.plt sections
-// so they receive virtual addresses during AssignLayout.
+// InjectPLTSections appends placeholder .plt and .got.plt sections so they
+// receive virtual addresses during AssignLayout.
+//
+// No .rela.plt is injected. PE resolves imports through the IAT and import
+// directory rather than ELF RELA entries; an allocatable section that
+// AssignLayout addresses but the emitter never writes would leave an uncovered
+// RVA range, which the NT image loader rejects with ERROR_BAD_EXE_FORMAT.
 func InjectPLTSections(layout *Layout, syms []PLTEntry) {
 	n := len(syms)
 	plt := &MergedSection{
-		Name:     ".plt",
-		Flags:    SecAlloc | SecExec,
-		RawType:  1,
-		RawFlags: 0x2 | 0x4,
-		Data:     make([]byte, pltHeaderSize+n*pltEntrySize),
-		Size:     uint64(pltHeaderSize + n*pltEntrySize),
-		Align:    16,
+		Name:  ".plt",
+		Flags: SecAlloc | SecExec,
+		Data:  make([]byte, pltHeaderSize+n*pltEntrySize),
+		Size:  uint64(pltHeaderSize + n*pltEntrySize),
+		Align: 16,
 	}
 	gotPLT := &MergedSection{
-		Name:     ".got.plt",
-		Flags:    SecAlloc | SecWrite,
-		RawType:  1,
-		RawFlags: 0x2 | 0x1,
-		Data:     make([]byte, (3+n)*gotEntrySize),
-		Size:     uint64((3 + n) * gotEntrySize),
-		Align:    8,
+		Name:  ".got.plt",
+		Flags: SecAlloc | SecWrite,
+		Data:  make([]byte, (gotReserved+n)*gotEntrySize),
+		Size:  uint64((gotReserved + n) * gotEntrySize),
+		Align: 8,
 	}
-	relaPLT := &MergedSection{
-		Name:     ".rela.plt",
-		Flags:    SecAlloc,
-		RawType:  4,
-		RawFlags: 0x2 | 0x40,
-		Data:     make([]byte, n*relaEntSize),
-		Size:     uint64(n * relaEntSize),
-		Align:    8,
-	}
-	layout.Sections = append(layout.Sections, plt, gotPLT, relaPLT)
+	layout.Sections = append(layout.Sections, plt, gotPLT)
 	layout.secByName[".plt"] = plt
 	layout.secByName[".got.plt"] = gotPLT
-	layout.secByName[".rela.plt"] = relaPLT
 }
 
-// PatchPLT fills PLT stubs, GOT.PLT slots, and JUMP_SLOT reloc entries, then
-// assigns each PLT symbol's VAddr to its stub.
+// PatchPLT fills the PLT thunks and assigns each PLT symbol's VAddr to its stub.
 func PatchPLT(pp PLTPatcher, layout *Layout, syms []PLTEntry) error {
 	pltSec, ok1 := layout.SectionByName(".plt")
 	gotSec, ok2 := layout.SectionByName(".got.plt")
-	relaSec, ok3 := layout.SectionByName(".rela.plt")
-	if !ok1 || !ok2 || !ok3 {
+	if !ok1 || !ok2 {
 		return nil
 	}
-	pp.PatchPLT(pltSec.Data, gotSec.Data, relaSec.Data, pltSec.VAddr, gotSec.VAddr, syms)
+	pp.PatchPLT(pltSec.Data, gotSec.Data, pltSec.VAddr, gotSec.VAddr, syms)
 	return nil
 }
 

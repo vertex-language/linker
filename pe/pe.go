@@ -15,7 +15,18 @@ const (
 	ArchARM64 Arch = 2
 )
 
+// ImportInfo carries the import/IAT data-directory coordinates to the writer.
+type ImportInfo struct {
+	ImportDirRVA  uint32
+	ImportDirSize uint32
+	IATRVA        uint32
+	IATSize       uint32
+}
+
 // EmitRequest carries all post-link data needed to produce the PE32+ binary.
+// The writer reads section placement straight from Layout; the only directory
+// data it cannot derive from sections by name is the import/IAT coordinates,
+// which arrive in Imports.
 type EmitRequest struct {
 	Arch       Arch
 	OutputType OutputType
@@ -24,8 +35,7 @@ type EmitRequest struct {
 	Needed     []string
 	Layout     *Layout
 	Symtab     *SymbolTable
-	PLTSyms    []string
-	BaseRelocs []BaseRelocSite
+	Imports    *ImportInfo // nil when the image has no imports
 }
 
 // Linker is the self-contained PE32+ linker.
@@ -100,13 +110,17 @@ func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
 }
 
 // Link runs all linking phases and returns the finished PE32+ binary.
+//
+// All generated sections (.plt, .got.plt, .idata) are injected before
+// AssignLayout so the layout is the single authority for every VAddr the
+// writer emits. .reloc is the one exception — its size is known only after
+// relocation — and it is placed through Layout.AppendAllocSection, which
+// reuses the same contiguity rule. The writer invents no addresses.
 func (l *Linker) Link() ([]byte, error) {
-	// Phase 1: transitive DLL dependency walk.
 	if err := l.walkSharedDeps(); err != nil {
 		return nil, fmt.Errorf("link: dep walk: %w", err)
 	}
 
-	// Phase 2: symbol resolution.
 	symtab := NewSymbolTable()
 	allObjects := l.collectObjects()
 	if err := symtab.Ingest(allObjects, l.archives, l.shared); err != nil {
@@ -114,59 +128,69 @@ func (l *Linker) Link() ([]byte, error) {
 	}
 	allObjects = l.collectObjects()
 
-	// Phase 3: section merging.
 	layout, err := MergeSections(allObjects)
 	if err != nil {
 		return nil, fmt.Errorf("link: merge: %w", err)
 	}
 
-	// Phase 3b: collect PLT symbols from object relocations before GC.
-	// Collection is safe here because it reads raw object relocs which GC
-	// does not touch. Injection is deferred until after GC so the synthetic
-	// .plt / .got.plt / .rela.plt sections are never subject to elimination.
 	pltSyms := CollectPLTSymbols(symtab, allObjects)
-
-	// Phase 4: dead-code elimination.
 	GC(layout, symtab, allObjects, l.outputType, l.entry)
 
-	// Phase 4b: inject PLT and IAT sections after GC.
-	if len(pltSyms) > 0 {
+	var geom idataGeom
+	hasImports := len(pltSyms) > 0
+	if hasImports {
 		InjectPLTSections(layout, pltSyms)
-		if err := l.injectIATSections(layout, pltSyms); err != nil {
-			return nil, fmt.Errorf("link: inject IAT: %w", err)
+		l.iatLayout = computeIATLayout(pltSyms)
+		if got, ok := layout.SectionByName(".got.plt"); ok {
+			extra := uint64(len(l.iatLayout.DLLOrder) * 8) // per-DLL IAT terminators
+			got.Data = append(got.Data, make([]byte, extra)...)
+			got.Size += extra
 		}
+		geom = l.injectIdata(layout, symtab, pltSyms)
 	}
 
-	// Phase 5: virtual address and file-offset assignment.
 	if err := AssignLayout(l.outputType, layout, 0); err != nil {
 		return nil, fmt.Errorf("link: assign layout: %w", err)
 	}
-
-	// Phase 6: resolve symbol virtual addresses.
 	if err := ResolveSymbolAddresses(symtab, layout); err != nil {
 		return nil, fmt.Errorf("link: resolve symbols: %w", err)
 	}
 
-	// Phase 7: write import thunks and assign stub VAddrs to shared symbols.
-	if len(pltSyms) > 0 {
+	coreBase := coreBaseVA(l.outputType)
+
+	var imports *ImportInfo
+	if hasImports {
 		if err := PatchPLT(l.newPLTPatcher(), layout, pltSyms); err != nil {
 			return nil, fmt.Errorf("link: PLT patch: %w", err)
 		}
+		idataSec, _ := layout.SectionByName(".idata")
+		gotSec, _ := layout.SectionByName(".got.plt")
+		idataRVA := toRVA(idataSec.VAddr, coreBase)
+		iatBaseRVA := toRVA(gotSec.VAddr, coreBase) + gotReserved*8
+		impSize, iatSize := fillImports(idataSec.Data, gotSec.Data, idataRVA, iatBaseRVA, geom)
+		imports = &ImportInfo{
+			ImportDirRVA:  idataRVA,
+			ImportDirSize: impSize,
+			IATRVA:        iatBaseRVA,
+			IATSize:       iatSize,
+		}
 	}
 
-	// Phase 8: relocation patching.
 	p := l.newPatcher()
 	if err := PatchAll(layout, symtab, allObjects, p); err != nil {
 		return nil, fmt.Errorf("link: reloc patch: %w", err)
 	}
 
-	// Phase 8b: collect base-relocation sites for .reloc section.
-	var baseRelocs []BaseRelocSite
-	if brc, ok := p.(BaseRelocCollector); ok {
-		baseRelocs = brc.BaseRelocSites()
+	if l.outputType != OutputExec {
+		if brc, ok := p.(BaseRelocCollector); ok {
+			if sites := brc.BaseRelocSites(); len(sites) > 0 {
+				if relocBytes := buildBaseRelocSection(sites, coreBase); len(relocBytes) > 0 {
+					layout.AppendAllocSection(".reloc", relocBytes, SecDiscard, 4)
+				}
+			}
+		}
 	}
 
-	// Phase 9: collect import dependencies.
 	needed := collectNeeded(l.shared)
 	seen := make(map[string]bool, len(needed))
 	for _, n := range needed {
@@ -179,8 +203,7 @@ func (l *Linker) Link() ([]byte, error) {
 		}
 	}
 
-	// Phase 10: emit PE32+ binary.
-	req := &EmitRequest{
+	out, err := emitPE(&EmitRequest{
 		Arch:       l.arch,
 		OutputType: l.outputType,
 		Entry:      l.entry,
@@ -188,28 +211,28 @@ func (l *Linker) Link() ([]byte, error) {
 		Needed:     needed,
 		Layout:     layout,
 		Symtab:     symtab,
-		PLTSyms:    pltSymNames(pltSyms),
-		BaseRelocs: baseRelocs,
-	}
-	out, err := emitPE(l.iatLayout, req)
+		Imports:    imports,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("link: emit: %w", err)
 	}
 	return out, nil
 }
 
-// injectIATSections computes the DLL-grouped IATLayout and resizes .got.plt
-// to include per-DLL null-terminator slots.
-func (l *Linker) injectIATSections(layout *Layout, pltSyms []PLTEntry) error {
-	l.iatLayout = computeIATLayout(pltSyms)
-	got, ok := layout.SectionByName(".got.plt")
-	if !ok {
-		return nil
+// injectIdata appends a sized .idata placeholder before address assignment and
+// returns its geometry for the later fill pass.
+func (l *Linker) injectIdata(layout *Layout, symtab *SymbolTable, pltSyms []PLTEntry) idataGeom {
+	g := computeIdataGeom(symtab, pltSymNames(pltSyms), l.iatLayout)
+	sec := &MergedSection{
+		Name:  ".idata",
+		Flags: SecAlloc | SecWrite,
+		Data:  make([]byte, g.size()),
+		Size:  uint64(g.size()),
+		Align: 8,
 	}
-	extra := uint64(len(l.iatLayout.DLLOrder) * 8)
-	got.Data = append(got.Data, make([]byte, extra)...)
-	got.Size += extra
-	return nil
+	layout.Sections = append(layout.Sections, sec)
+	layout.secByName[".idata"] = sec
+	return g
 }
 
 func (l *Linker) newPatcher() Patcher {
@@ -266,8 +289,6 @@ func (l *Linker) walkSharedDeps() error {
 }
 
 // isAPISet reports whether soname is a Windows API Set virtual DLL.
-// These have no real file on disk; the OS loader resolves them at runtime
-// through the API Set schema. Attempting to open them as files always fails.
 func isAPISet(soname string) bool {
 	s := strings.ToLower(soname)
 	return strings.HasPrefix(s, "api-ms-win-") ||

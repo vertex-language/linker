@@ -90,7 +90,7 @@ type amd64PLTPatcher struct {
 }
 
 func (p *amd64PLTPatcher) PatchPLT(
-	plt, gotPLT, relaPLT []byte,
+	plt, gotPLT []byte,
 	pltBase, gotBase uint64,
 	syms []PLTEntry,
 ) {
@@ -103,11 +103,11 @@ func (p *amd64PLTPatcher) PatchPLT(
 		gotResSlots = 3
 	)
 	for _, s := range syms {
-		slot   := p.iatLayout.SlotOf[s.Idx]
-		iatVA  := gotBase + uint64(gotResSlots+slot)*8
+		slot := p.iatLayout.SlotOf[s.Idx]
+		iatVA := gotBase + uint64(gotResSlots+slot)*8
 		thunkVA := pltBase + uint64(pltHdrSize+s.Idx*pltEntSz)
-		rel32   := int32(int64(iatVA) - int64(thunkVA+6))
-		tOff    := pltHdrSize + s.Idx*pltEntSz
+		rel32 := int32(int64(iatVA) - int64(thunkVA+6))
+		tOff := pltHdrSize + s.Idx*pltEntSz
 		plt[tOff+0] = 0xFF
 		plt[tOff+1] = 0x25
 		binary.LittleEndian.PutUint32(plt[tOff+2:], uint32(rel32))
