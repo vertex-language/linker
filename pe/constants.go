@@ -40,6 +40,7 @@ const (
 	dirExport    = 0
 	dirImport    = 1
 	dirBaseReloc = 5
+	dirException = 3  // ← add this
 	dirIAT       = 12
 	dirCount     = 16
 )

@@ -181,6 +181,16 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 		}
 	}
 
+	// ── 6b. Locate .pdata for the exception directory ─────────────────────
+	var exceptionDirRVA, exceptionDirSize uint32
+	for _, ps := range sects {
+		if ps.ms != nil && ps.ms.Name == ".pdata" {
+			exceptionDirRVA = ps.rva
+			exceptionDirSize = ps.vsize
+			break
+		}
+	}
+
 	fileChars := imageFileExecutableImage | imageFileLargeAddressAware
 	if req.OutputType == OutputExec {
 		fileChars |= imageFileRelocsStripped
@@ -249,8 +259,10 @@ func emitPE(iatLayout *IATLayout, req *EmitRequest) ([]byte, error) {
 	le32(ws+84, dirCount)
 
 	dd := opt + 112
-	le32(dd+dirImport*8,   importDirRVA)
-	le32(dd+dirImport*8+4, importDirSize)
+	le32(dd+dirImport*8,    importDirRVA)
+	le32(dd+dirImport*8+4,  importDirSize)
+	le32(dd+dirException*8,   exceptionDirRVA)
+	le32(dd+dirException*8+4, exceptionDirSize)
 	le32(dd+dirBaseReloc*8,   relocDirRVA)
 	le32(dd+dirBaseReloc*8+4, relocDirSize)
 	le32(dd+dirIAT*8,   iatDirRVA)
